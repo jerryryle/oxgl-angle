@@ -1,0 +1,6 @@
+# Cross-compiled on an x64 host against Chromium's arm64 sysroot, which
+# build.sh installs before gn gen.
+target_cpu = "arm64"
+# Headless: no display-server integrations, so no libX11/xcb/wayland linkage.
+angle_use_x11 = false
+angle_use_wayland = false

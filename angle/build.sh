@@ -6,7 +6,9 @@
 #   angle/build.sh bundle <platform> assemble, check and archive the bundle
 #   angle/build.sh all <platform>   all of the above
 #
-# <platform> is linux-x64 or macos-arm64 (Windows uses build.ps1).
+# <platform> is linux-x64, linux-arm64 or macos-arm64 (Windows uses build.ps1).
+# linux-arm64 is cross-compiled on a Linux x64 host against Chromium's arm64
+# sysroot.
 # Work happens in $OXGL_ANGLE_WORK (default ~/.cache/oxgl/angle-build), outside
 # the repository; output lands in $OXGL_ANGLE_WORK/dist.
 set -euo pipefail
@@ -50,6 +52,11 @@ build() {
   local platform="$1" out
   out="$(out_dir "$platform")"
   mkdir -p "$out"
+  if [[ "$platform" == linux-arm64 ]]; then
+    # ANGLE's DEPS hooks install only the x86/x64 sysroots; fetch the arm64 one
+    # (pinned by build/linux/sysroot_scripts/sysroots.json) ourselves.
+    (cd "$work/angle" && python3 build/linux/sysroot_scripts/install-sysroot.py --arch=arm64)
+  fi
   cat "$here/args/common.gn" "$here/args/$platform.gn" > "$out/args.gn"
   (cd "$work/angle" && gn gen "$out")
   python3 "$here/scripts/bundle.py" --preflight "$platform" "$out" "$work/angle"

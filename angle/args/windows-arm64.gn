@@ -1,0 +1,4 @@
+# Cross-compiled on an x64 host with Visual Studio's ARM64 build tools.
+target_cpu = "arm64"
+angle_enable_d3d11 = true
+angle_enable_d3d9 = false

@@ -1,7 +1,8 @@
 # Builds the oxgl ANGLE bundles from the recipe in angle/ (pin.toml, GN args,
 # scripts, license data). On pull requests that touch the recipe it builds,
-# checks and smoke-tests all three platforms and keeps the bundles as run
-# artifacts. Run manually (workflow_dispatch) from main to also create a draft
+# checks and smoke-tests all five platforms and keeps the bundles as run
+# artifacts. The arm64 Linux and Windows bundles are cross-compiled on x64
+# runners and smoke-tested on arm64 runners in the smoke job. Run manually (workflow_dispatch) from main to also create a draft
 # release, then copy the printed digests into angle/bundles.toml (see
 # angle/README.md). Published bundle versions are never rebuilt or replaced.
 name: angle-build
@@ -59,13 +60,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # native: the runner can execute the bundle, so the smoke test runs here;
+        # cross-compiled bundles are smoke-tested by the smoke job instead.
         include:
           - platform: linux-x64
             runner: ubuntu-24.04
+            native: true
+          - platform: linux-arm64
+            runner: ubuntu-24.04
+            native: false
           - platform: macos-arm64
             runner: macos-15
+            native: true
           - platform: windows-x64
             runner: windows-2025
+            native: true
+          - platform: windows-arm64
+            runner: windows-2025
+            native: false
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 300
     steps:
@@ -80,6 +92,10 @@ jobs:
           sudo mkdir -p /mnt/angle-build
           sudo chown "$USER" /mnt/angle-build
           echo "OXGL_ANGLE_WORK=/mnt/angle-build" >> "$GITHUB_ENV"
+      - name: Cross binutils (linux-arm64)
+        if: matrix.platform == 'linux-arm64'
+        # bundle.py strips and inspects the arm64 libraries with these.
+        run: sudo apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
       - name: Work directory and Metal Toolchain (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -118,21 +134,34 @@ jobs:
             'modify', '--installPath', "`"$vs`"", '--add', $component, '--quiet', '--norestart', '--nocache')
           if ($p.ExitCode -notin 0, 3010) { throw "vs_installer exited with $($p.ExitCode)" }
           if (-not (Test-Path $include)) { throw "Windows SDK $sdk headers not found after install: $include" }
+      - name: Install the Visual Studio ARM64 build tools (windows-arm64)
+        if: matrix.platform == 'windows-arm64'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $found = & $vswhere -latest -requires Microsoft.VisualStudio.Component.VC.Tools.ARM64 -property installationPath
+          if ($found) { 'VS ARM64 build tools already installed'; exit 0 }
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            'modify', '--installPath', "`"$vs`"", '--add', 'Microsoft.VisualStudio.Component.VC.Tools.ARM64',
+            '--quiet', '--norestart', '--nocache')
+          if ($p.ExitCode -notin 0, 3010) { throw "vs_installer exited with $($p.ExitCode)" }
       - name: Build bundle (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          angle/build.ps1 build
-          angle/build.ps1 bundle
+          angle/build.ps1 build ${{ matrix.platform }}
+          angle/build.ps1 bundle ${{ matrix.platform }}
 
       - name: Smoke test (Linux, macOS)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.native
         run: |
           dist="$OXGL_ANGLE_WORK/dist/angle-${{ matrix.platform }}"
           cc -O2 -I"$dist/include" angle/smoke/smoke.c -o smoke -ldl
           env -u DISPLAY -u WAYLAND_DISPLAY ./smoke "$dist/lib"
       - name: Smoke test (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && matrix.native
         shell: pwsh
         run: |
           $dist = "$env:OXGL_ANGLE_WORK\dist\angle-windows-x64"
@@ -150,8 +179,48 @@ jobs:
             ${{ env.OXGL_ANGLE_WORK }}/dist/angle-${{ matrix.platform }}-symbols.tar.xz
           if-no-files-found: error
 
-  release:
+  # Cross-compiled bundles are smoke-tested on a runner of their own
+  # architecture, from the artifact the build job uploaded.
+  smoke:
     needs: build
+    name: smoke (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+          - platform: windows-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: angle-${{ matrix.platform }}
+          path: bundle
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Extract bundle
+        run: python -c "import sys, tarfile; tarfile.open(sys.argv[1]).extractall(sys.argv[2], filter='data')" "bundle/angle-${{ matrix.platform }}.tar.xz" dist
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cc -O2 -Idist/include angle/smoke/smoke.c -o smoke -ldl
+          env -u DISPLAY -u WAYLAND_DISPLAY ./smoke "$PWD/dist/lib"
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsarm64.bat`" && cl /nologo /O2 /Idist\include angle\smoke\smoke.c /Fe:smoke.exe"
+          if ($LASTEXITCODE) { throw 'smoke build failed' }
+          .\smoke.exe "$PWD\dist\lib"
+          if ($LASTEXITCODE) { throw 'smoke test failed' }
+
+  release:
+    needs: [build, smoke]
     # Releases are only created by a deliberate manual run, never by a PR.
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04

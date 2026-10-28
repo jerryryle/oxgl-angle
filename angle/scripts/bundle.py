@@ -12,8 +12,8 @@ Produces <dist-dir>/angle-<platform>.tar.xz (stripped libraries, headers,
 licenses, BUILD_INFO.json) and angle-<platform>-symbols.tar.xz (unstripped
 libraries), and prints the bundle's sha256. Fails if any outcome check fails:
 missing files, a component license that is not on the allowlist in deny.toml,
-display-server linkage or a too-new glibc on Linux, or a required backend that
-is not enabled.
+display-server linkage or a too-new glibc on Linux, a load segment aligned below
+64 KiB on Linux arm64, or a required backend that is not enabled.
 """
 
 import hashlib
@@ -29,20 +29,30 @@ import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
+# linux-arm64 is cross-compiled on an x64 host, whose binutils only understand
+# x86 ELF; use the aarch64 cross binutils there (binutils-aarch64-linux-gnu).
+CROSS_BINUTILS = {"linux-arm64": "aarch64-linux-gnu-"}
 GLIBC_MAX = (2, 31)
+# Linux arm64 kernels use 4, 16 or 64 KiB pages; a library loads under all of
+# them only if every LOAD segment is aligned to the largest.
+ARM64_MIN_ALIGN = 0x10000
 FORBIDDEN_NEEDED = ("libX11", "libxcb", "libwayland-client")
 REQUIRED_ARGS = {
     "common": {"angle_enable_vulkan": "true", "angle_enable_swiftshader": "true", "angle_enable_wgpu": "false"},
     "macos-arm64": {"angle_enable_metal": "true"},
     "linux-x64": {"angle_use_x11": "false", "angle_use_wayland": "false"},
+    "linux-arm64": {"angle_use_x11": "false", "angle_use_wayland": "false"},
     "windows-x64": {"angle_enable_d3d11": "true"},
+    "windows-arm64": {"angle_enable_d3d11": "true"},
 }
 LIB_PATTERNS = {
     "macos-arm64": ("libEGL.dylib", "libGLESv2.dylib", "libvk_swiftshader.dylib", "libvulkan*.dylib"),
     "linux-x64": ("libEGL.so", "libGLESv2.so", "libvk_swiftshader.so", "libvulkan.so*"),
+    "linux-arm64": ("libEGL.so", "libGLESv2.so", "libvk_swiftshader.so", "libvulkan.so*"),
     "windows-x64": ("libEGL.dll", "libGLESv2.dll", "vk_swiftshader.dll", "vulkan-1.dll"),
+    "windows-arm64": ("libEGL.dll", "libGLESv2.dll", "vk_swiftshader.dll", "vulkan-1.dll"),
 }
-REQUIRED_LIBS = {"macos-arm64": 3, "linux-x64": 3, "windows-x64": 3}  # EGL, GLESv2, SwiftShader
+REQUIRED_LIBS = dict.fromkeys(LIB_PATTERNS, 3)  # EGL, GLESv2, SwiftShader
 HEADER_DIRS = ("EGL", "GLES2", "GLES3", "KHR")
 LICENSE_NAMES = ("LICENSE", "LICENSE.txt", "LICENSE.TXT", "LICENSE.md", "COPYING", "NOTICE", "NOTICE.txt")
 
@@ -166,25 +176,50 @@ def collect_licenses(src: Path, out: Path, stage: Path) -> list[dict[str, str]]:
     return components
 
 
-def linux_checks(libs: list[Path]) -> str:
+def binutil(platform: str, tool: str) -> str:
+    prefix = CROSS_BINUTILS.get(platform, "")
+    return f"{prefix}{tool}" if prefix and host.machine() not in ("aarch64", "arm64") else tool
+
+
+def linux_checks(libs: list[Path], platform: str) -> str:
     newest = (0, 0)
     for lib in libs:
         needed = run("readelf", "-d", str(lib))
         for bad in FORBIDDEN_NEEDED:
             if bad in needed:
                 fail(f"{lib.name} links {bad}")
-        for major, minor in re.findall(r"GLIBC_(\d+)\.(\d+)", run("objdump", "-T", str(lib))):
+        for major, minor in re.findall(r"GLIBC_(\d+)\.(\d+)", run(binutil(platform, "objdump"), "-T", str(lib))):
             newest = max(newest, (int(major), int(minor)))
     if newest > GLIBC_MAX:
         fail(f"bundle needs glibc {newest[0]}.{newest[1]}, above the {GLIBC_MAX[0]}.{GLIBC_MAX[1]} baseline")
     return f"{newest[0]}.{newest[1]}"
 
 
+def min_load_align(lib: Path) -> int:
+    """The smallest LOAD segment alignment in an ELF library's program headers."""
+    aligns = [int(line.split()[-1], 16) for line in run("readelf", "-lW", str(lib)).splitlines()
+              if line.split()[:1] == ["LOAD"]]
+    if not aligns:
+        fail(f"{lib.name} has no LOAD segments")
+    return min(aligns)
+
+
+def arm64_alignment_check(libs: list[Path]) -> str:
+    smallest = None
+    for lib in libs:
+        align = min_load_align(lib)
+        if align < ARM64_MIN_ALIGN:
+            fail(f"{lib.name} has a LOAD segment aligned to {align:#x}, below the {ARM64_MIN_ALIGN:#x} "
+                 "needed to load on every arm64 page size")
+        smallest = align if smallest is None else min(smallest, align)
+    return f"{smallest:#x}"
+
+
 def strip(lib: Path, platform: str) -> None:
     if platform == "macos-arm64":
         run("strip", "-x", str(lib))
-    elif platform == "linux-x64":
-        run("strip", "--strip-unneeded", str(lib))
+    elif platform.startswith("linux-"):
+        run(binutil(platform, "strip"), "--strip-unneeded", str(lib))
     # Windows symbols already live in separate .pdb files.
 
 
@@ -246,7 +281,8 @@ def main() -> None:
 
     args = effective_args(src, out, platform)
     components = collect_licenses(src, out, stage)
-    glibc = linux_checks(libs) if platform == "linux-x64" else None
+    glibc = linux_checks(libs, platform) if platform.startswith("linux-") else None
+    load_align = arm64_alignment_check(libs) if platform == "linux-arm64" else None
 
     clang_rev = src / "third_party" / "llvm-build" / "Release+Asserts" / "cr_build_revision"
     info = {
@@ -257,6 +293,7 @@ def main() -> None:
         "clang_revision": clang_rev.read_text().strip() if clang_rev.exists() else None,
         "macos_sdk": run("xcrun", "--show-sdk-version").strip() if platform == "macos-arm64" else None,
         "glibc_max": glibc,
+        "min_load_align": load_align,
         "gn_args": args,
         "gn_args_file": (out / "args.gn").read_text(),
         "components": components,

@@ -1,7 +1,12 @@
-# Windows counterpart of build.sh: builds the oxgl ANGLE bundle for windows-x64.
-#   pwsh angle/build.ps1 fetch|build|bundle|all
-# Needs Visual Studio 2022 with the Windows SDK, Git, and Python 3.11+.
-param([Parameter(Mandatory)][ValidateSet('fetch', 'build', 'bundle', 'all')][string]$Command)
+# Windows counterpart of build.sh: builds the oxgl ANGLE bundle for windows-x64
+# or windows-arm64.
+#   pwsh angle/build.ps1 fetch|build|bundle|all [windows-x64|windows-arm64]
+# Needs Visual Studio 2022 with the Windows SDK, Git, and Python 3.11+; for
+# windows-arm64 (cross-compiled on an x64 host) also the VS ARM64 build tools.
+param(
+  [Parameter(Mandatory)][ValidateSet('fetch', 'build', 'bundle', 'all')][string]$Command,
+  [ValidateSet('windows-x64', 'windows-arm64')][string]$Platform = 'windows-x64'
+)
 $ErrorActionPreference = 'Stop'
 
 $here = $PSScriptRoot
@@ -10,7 +15,7 @@ function Pin($key) { (Select-String -Path "$here\pin.toml" -Pattern "^$key\s*=\s
 $angleCommit = Pin 'angle_commit'
 $depotToolsCommit = Pin 'depot_tools_commit'
 $bundleVersion = Pin 'bundle_version'
-$platform = 'windows-x64'
+$platform = $Platform
 $out = Join-Path $work "angle\out\oxgl-$platform"
 
 $env:PATH = "$work\depot_tools;$env:PATH"
