@@ -15,3 +15,13 @@ sha256 = "39f0e98c13bb4c710003a139a70aff260fb9f57accfd12b871db2d97b60289ef"
 [platform.windows-x64]
 url = "https://github.com/jerryryle/oxgl/releases/download/angle-8078.1/angle-windows-x64.tar.xz"
 sha256 = "60e0e5d9be2056c67c5cf133ef868ecd761591dc8bde6a9635d0337f0a75c9b4"
+
+# Filled in once angle-8078.2 is released (check_pin.py --allow-unpublished
+# accepts the empty entries until then).
+[platform.linux-arm64]
+url = ""
+sha256 = ""
+
+[platform.windows-arm64]
+url = ""
+sha256 = ""

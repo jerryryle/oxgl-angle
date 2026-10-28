@@ -4,5 +4,5 @@
 
 angle_commit = "127e783de33425c27a70a3f48da9d9202d6a0745"
 chromium_branch = "chromium/8078"   # Chrome 156 stable; informational
-bundle_version = "angle-8078.1"     # release tag; .N increments on rebuilds of the same branch
+bundle_version = "angle-8078.2"     # release tag; .N increments on rebuilds of the same branch
 depot_tools_commit = "3218cfc968b246bf2498fd13f707851a0b1cd408"

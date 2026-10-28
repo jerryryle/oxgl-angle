@@ -14,7 +14,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-PLATFORMS = ("linux-x64", "macos-arm64", "windows-x64")
+PLATFORMS = ("linux-x64", "linux-arm64", "macos-arm64", "windows-x64", "windows-arm64")
 VERSION = r"angle-\d+\.\d+"
 
 
