@@ -1,0 +1,8 @@
+# The ANGLE build recipe's pinned inputs (see angle/README.md). Changing a value
+# here, or any other recipe file listed in angle/README.md, is a recipe change:
+# bump bundle_version, and angle-build rebuilds the bundles.
+
+angle_commit = "127e783de33425c27a70a3f48da9d9202d6a0745"
+chromium_branch = "chromium/8078"   # Chrome 156 stable; informational
+bundle_version = "angle-8078.1"     # release tag; .N increments on rebuilds of the same branch
+depot_tools_commit = "3218cfc968b246bf2498fd13f707851a0b1cd408"

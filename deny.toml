@@ -24,6 +24,8 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSL-1.0",
     "Unicode-3.0",
+    "NCSA",
+    "Spencer-94",
 ]
 confidence-threshold = 0.8
 # The allowlist is policy, not an inventory of current dependencies.

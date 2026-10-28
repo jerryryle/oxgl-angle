@@ -1,0 +1,120 @@
+# ANGLE bundles
+
+oxgl renders through [ANGLE](https://chromium.googlesource.com/angle/angle),
+with SwiftShader as the software fallback. Google publishes no ANGLE binaries,
+so oxgl builds its own from a pinned revision and publishes them as GitHub
+release assets. Everything else (developers, CI, npm builds) downloads those
+bundles and verifies them against digests committed here, so ANGLE is built
+only when its recipe changes.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `pin.toml` | Recipe inputs: ANGLE commit, depot_tools commit, `bundle_version` (release tag) |
+| `bundles.toml` | Build outputs: per-platform bundle URL + sha256 that oxgl-sys downloads |
+| `args/*.gn` | GN build arguments: `common.gn` plus one file per platform |
+| `args/targets.txt` | Ninja targets to build |
+| `build.sh`, `build.ps1` | Build recipe (`fetch`, `build`, `bundle`, `all`) for macOS/Linux and Windows |
+| `scripts/bundle.py` | Assembles the bundle and enforces the outcome checks |
+| `scripts/check_pin.py` | Validates `pin.toml` and `bundles.toml` |
+| `licenses.toml` | SPDX licenses for third_party directories lacking `README.chromium` metadata |
+| `smoke/smoke.c` | Loads a bundle, renders one frame with SwiftShader, reads a pixel back |
+
+## Bundle layout
+
+```
+lib/        libEGL, libGLESv2, SwiftShader Vulkan ICD + vk_swiftshader_icd.json (stripped)
+include/    EGL, GLES2, GLES3, KHR headers, including ANGLE extension headers
+licenses/   license texts of ANGLE and every linked third_party component
+BUILD_INFO.json   commit, GN args, toolchain, components with SPDX licenses, file digests
+```
+
+Bundles are `angle-<platform>.tar.xz`; unstripped libraries are in
+`angle-<platform>-symbols.tar.xz`.
+
+`bundle.py` fails the build if a required library or the ICD manifest is
+missing, a required backend is not enabled, a linked component's license is
+missing or not on the allowlist in `deny.toml`, or (Linux) a library links
+X11/xcb/Wayland or needs glibc newer than 2.31.
+The GN-arg and license checks also run right after `gn gen`
+(`bundle.py --preflight`), so they fail before the compile rather than after it.
+
+## How oxgl-sys finds a bundle
+
+`crates/oxgl-sys/build.rs` uses, in order:
+
+1. `OXGL_ANGLE_DIR`: an extracted bundle directory (offline builds, or testing a
+   local ANGLE build). The build prints a warning while this is set.
+2. The cache: `$OXGL_ANGLE_CACHE`, default `~/.cargo/oxgl-angle/<sha256>/`.
+3. A download of the URL in `bundles.toml` with `curl`, verified against its
+   sha256 before anything is extracted. A mismatch fails the build.
+
+When `pin.toml` names a newer `bundle_version` than `bundles.toml` (a recipe
+change has merged but its bundles are not pinned yet), the build uses the older
+bundles and prints a warning.
+
+`npm run build` then copies the bundle's `lib/` to `dist/angle/` next to the
+addon and writes `dist/THIRD_PARTY_NOTICES` with the ANGLE license texts.
+
+`build.rs` also re-checks the bundle's component licenses (from
+`BUILD_INFO.json`) against today's `deny.toml` allowlist and fails if one is no
+longer allowed: narrowing the allowlist needs a bundle built under it (see
+Changing ANGLE), or the change reverted.
+
+## Building locally
+
+Needs Git, Python 3.11+, and the platform toolchain: on macOS, full Xcode plus
+its Metal Toolchain component (`xcodebuild -downloadComponent MetalToolchain`);
+on Windows, Visual Studio 2022 with the Windows SDK. `build.sh` selects
+`/Applications/Xcode.app` through `DEVELOPER_DIR` for the build only. The checkout and build
+need about 20 GB in `$OXGL_ANGLE_WORK` (default `~/.cache/oxgl/angle-build`).
+
+```sh
+angle/build.sh all macos-arm64          # or linux-x64; Windows: pwsh angle/build.ps1 all
+cc -I ~/.cache/oxgl/angle-build/dist/angle-macos-arm64/include angle/smoke/smoke.c -o smoke
+./smoke ~/.cache/oxgl/angle-build/dist/angle-macos-arm64/lib
+OXGL_ANGLE_DIR=~/.cache/oxgl/angle-build/dist/angle-macos-arm64 npm run build
+```
+
+## Measured sizes
+
+| Platform | Checkout + build tree | Bundle (`.tar.xz`) | Unpacked `lib/` |
+|---|---|---|---|
+| macos-arm64 (M-series, 16 cores) | ~13 GB | to re-measure without WebGPU (was 7.6 MB) | to re-measure (was 28 MB) |
+| linux-x64 | first `angle-build` run | | |
+| windows-x64 | first `angle-build` run | | |
+
+## Changing ANGLE
+
+The recipe is every file that builds or tests a bundle: `pin.toml`, `args/`, `build.sh`, `build.ps1`, `scripts/bundle.py`, `scripts/pin.sh`, `smoke/`, `licenses.toml`, `license-texts/`, and
+`.github/workflows/angle-build.yml`. `angle-build` runs only for those. Any recipe change (a new ANGLE commit, GN args, targets, scripts,
+license data) gets a new `bundle_version`: published bundles are never rebuilt
+or replaced, because rebuilds are not bit-identical and older commits pin the
+old digests.
+
+1. Optionally iterate locally first: change the recipe, run
+   `angle/build.sh all <platform>` (later runs recompile only what changed) and
+   point oxgl at the result with `OXGL_ANGLE_DIR`.
+2. Open a PR with the recipe change and a bumped `bundle_version` in
+   `pin.toml` (`angle-NNNN.<n+1>`; for a new ANGLE version, pick the commit
+   Chrome stable ships, listed on chromiumdash.appspot.com, and set
+   `angle_commit`, `chromium_branch` and `angle-<branch>.1`). `angle-build`
+   runs: it fails within seconds if the version is already released, within
+   minutes if a GN arg or license check fails (`bundle.py --preflight`), and
+   otherwise builds, checks and smoke-tests all three platforms.
+3. After it merges, run `angle-build` by hand from `main` (Actions →
+   angle-build → Run workflow). That run creates a draft release named after
+   `bundle_version`, with the digests in its summary.
+4. Copy each platform's URL and sha256, and the `bundle_version`, into
+   `bundles.toml`, run `python3 angle/scripts/check_pin.py`, and open a PR.
+   This does not rebuild ANGLE; CI builds oxgl against the new bundles.
+5. When that PR merges, publish the release without making it the
+   repository's latest release (oxgl's own `v*` releases share the list):
+   `gh release edit <bundle_version> --draft=false --latest=false`. If you
+   publish from the Releases page instead, untick "Set as the latest release",
+   which is ticked by default; the `--latest=false` set on the draft does not
+   carry over.
+
+A deleted or broken release asset is replaced the same way, under a new
+`bundle_version`.

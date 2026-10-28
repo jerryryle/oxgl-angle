@@ -1,0 +1,4 @@
+target_cpu = "x64"
+# Headless: no display-server integrations, so no libX11/xcb/wayland linkage.
+angle_use_x11 = false
+angle_use_wayland = false
