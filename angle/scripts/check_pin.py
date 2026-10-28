@@ -5,7 +5,8 @@
 
 Fails on a missing key or platform, a malformed commit, version or digest, a
 URL outside the release named by bundles.toml's bundle_version, or (unless
---allow-unpublished) a platform without a published URL and digest.
+--allow-unpublished) a platform without a published URL and digest. An optional
+symbols archive (symbols_url, symbols_sha256) is checked the same way.
 angle-dir defaults to this repository's angle/.
 """
 
@@ -41,14 +42,26 @@ def bundles_problems(bundles: dict, allow_unpublished: bool) -> list[str]:
             found.append(f"missing [platform.{name}]")
             continue
         url, sha = entry.get("url", ""), entry.get("sha256", "")
-        if not url and not sha and allow_unpublished:
-            continue
-        if not str(url).startswith("https://"):
-            found.append(f"platform.{name}.url must be an https URL")
-        elif version and f"/download/{version}/" not in str(url):
-            found.append(f"platform.{name}.url is not in the {version} release")
-        if not re.fullmatch(r"[0-9a-f]{64}", str(sha)):
-            found.append(f"platform.{name}.sha256 must be 64 lowercase hex characters")
+        if url or sha or not allow_unpublished:
+            found += archive_problems(f"platform.{name}.", url, sha, version)
+        if "symbols_url" in entry or "symbols_sha256" in entry:
+            found += archive_problems(
+                f"platform.{name}.symbols_",
+                entry.get("symbols_url", ""),
+                entry.get("symbols_sha256", ""),
+                version,
+            )
+    return found
+
+
+def archive_problems(field: str, url: object, sha: object, version: str) -> list[str]:
+    found = []
+    if not str(url).startswith("https://"):
+        found.append(f"{field}url must be an https URL")
+    elif version and f"/download/{version}/" not in str(url):
+        found.append(f"{field}url is not in the {version} release")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(sha)):
+        found.append(f"{field}sha256 must be 64 lowercase hex characters")
     return found
 
 
