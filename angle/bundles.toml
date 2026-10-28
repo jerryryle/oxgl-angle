@@ -5,13 +5,13 @@
 bundle_version = "angle-8078.1"     # the angle/pin.toml version these were built from
 
 [platform.linux-x64]
-url = ""
-sha256 = ""
+url = "https://github.com/jerryryle/oxgl/releases/download/angle-8078.1/angle-linux-x64.tar.xz"
+sha256 = "64229452251cfb672d59bda8f40f18480a50f5d0791c82e3922c4daad16b4512"
 
 [platform.macos-arm64]
-url = ""
-sha256 = ""
+url = "https://github.com/jerryryle/oxgl/releases/download/angle-8078.1/angle-macos-arm64.tar.xz"
+sha256 = "39f0e98c13bb4c710003a139a70aff260fb9f57accfd12b871db2d97b60289ef"
 
 [platform.windows-x64]
-url = ""
-sha256 = ""
+url = "https://github.com/jerryryle/oxgl/releases/download/angle-8078.1/angle-windows-x64.tar.xz"
+sha256 = "60e0e5d9be2056c67c5cf133ef868ecd761591dc8bde6a9635d0337f0a75c9b4"
