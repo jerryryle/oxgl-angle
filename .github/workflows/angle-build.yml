@@ -1,0 +1,189 @@
+# Builds the oxgl ANGLE bundles from the recipe in angle/ (pin.toml, GN args,
+# scripts, license data). On pull requests that touch the recipe it builds,
+# checks and smoke-tests all three platforms and keeps the bundles as run
+# artifacts. Run manually (workflow_dispatch) from main to also create a draft
+# release, then copy the printed digests into angle/bundles.toml (see
+# angle/README.md). Published bundle versions are never rebuilt or replaced.
+name: angle-build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    # The recipe: the files that build or test a bundle. bundles.toml (outputs),
+    # the README and check_pin.py are deliberately absent. (deny.toml is too:
+    # oxgl-sys's build.rs re-checks bundle licenses against it wherever oxgl builds.)
+    paths:
+      - "angle/pin.toml"
+      - "angle/args/**"
+      - "angle/build.sh"
+      - "angle/build.ps1"
+      - "angle/scripts/bundle.py"
+      - "angle/scripts/pin.sh"
+      - "angle/smoke/**"
+      - "angle/licenses.toml"
+      - "angle/license-texts/**"
+      - ".github/workflows/angle-build.yml"
+
+concurrency:
+  group: angle-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    # A recipe change needs a new bundle_version; fail in seconds, not after
+    # the compile. (Drafts are invisible to this read-only token; the release
+    # job catches those.)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse an already released bundle_version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(angle/scripts/pin.sh bundle_version)"
+          # Only a 404 means unreleased; any other failure (auth, rate limit,
+          # network) must not let a forgotten bump through.
+          status="$(gh api -i "repos/$GITHUB_REPOSITORY/releases/tags/$tag" 2>/dev/null | head -n1 || true)"
+          case "$status" in
+            *" 404"*) ;;
+            *" 200"*) echo "::error::$tag is already released; bump bundle_version in angle/pin.toml"; exit 1 ;;
+            *) echo "::error::could not check whether $tag is released (${status:-no response})"; exit 1 ;;
+          esac
+
+  build:
+    needs: guard
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: windows-x64
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Use the large disk for the ANGLE checkout (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo mkdir -p /mnt/angle-build
+          sudo chown "$USER" /mnt/angle-build
+          echo "OXGL_ANGLE_WORK=/mnt/angle-build" >> "$GITHUB_ENV"
+      - name: Work directory and Metal Toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "OXGL_ANGLE_WORK=$RUNNER_TEMP/angle-build" >> "$GITHUB_ENV"
+          # ANGLE compiles its Metal shaders with `metal`, an optional Xcode component.
+          xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+      - name: Work directory (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"OXGL_ANGLE_WORK=D:\angle-build" | Out-File -Append $env:GITHUB_ENV'
+
+      - name: Build bundle (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: angle/build.sh all ${{ matrix.platform }}
+      - name: Fetch ANGLE (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: angle/build.ps1 fetch
+      - name: Install the Windows SDK the pinned Chromium build requires
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Chromium pins an exact SDK (SDK_VERSION in build/vs_toolchain.py), which
+          # the runner image may not ship; add it as a Visual Studio component.
+          $toolchain = Get-Content "$env:OXGL_ANGLE_WORK\angle\build\vs_toolchain.py" -Raw
+          $sdk = [regex]::Match($toolchain, "SDK_VERSION = '([0-9.]+)'").Groups[1].Value
+          if (-not $sdk) { throw 'SDK_VERSION not found in build/vs_toolchain.py' }
+          $include = "${env:ProgramFiles(x86)}\Windows Kits\10\Include\$sdk\um"
+          if (Test-Path $include) { "Windows SDK $sdk already installed"; exit 0 }
+          $component = "Microsoft.VisualStudio.Component.Windows11SDK.$($sdk.Split('.')[2])"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+          "Installing $component into $vs"
+          $p = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            'modify', '--installPath', "`"$vs`"", '--add', $component, '--quiet', '--norestart', '--nocache')
+          if ($p.ExitCode -notin 0, 3010) { throw "vs_installer exited with $($p.ExitCode)" }
+          if (-not (Test-Path $include)) { throw "Windows SDK $sdk headers not found after install: $include" }
+      - name: Build bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          angle/build.ps1 build
+          angle/build.ps1 bundle
+
+      - name: Smoke test (Linux, macOS)
+        if: runner.os != 'Windows'
+        run: |
+          dist="$OXGL_ANGLE_WORK/dist/angle-${{ matrix.platform }}"
+          cc -O2 -I"$dist/include" angle/smoke/smoke.c -o smoke -ldl
+          env -u DISPLAY -u WAYLAND_DISPLAY ./smoke "$dist/lib"
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dist = "$env:OXGL_ANGLE_WORK\dist\angle-windows-x64"
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" && cl /nologo /O2 /I`"$dist\include`" angle\smoke\smoke.c /Fe:smoke.exe"
+          if ($LASTEXITCODE) { throw 'smoke build failed' }
+          .\smoke.exe "$dist\lib"
+          if ($LASTEXITCODE) { throw 'smoke test failed' }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: angle-${{ matrix.platform }}
+          path: |
+            ${{ env.OXGL_ANGLE_WORK }}/dist/angle-${{ matrix.platform }}.tar.xz
+            ${{ env.OXGL_ANGLE_WORK }}/dist/angle-${{ matrix.platform }}-symbols.tar.xz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # Releases are only created by a deliberate manual run, never by a PR.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: bundles
+          merge-multiple: true
+      - name: Create draft release and print digests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(angle/scripts/pin.sh bundle_version)"
+          commit="$(angle/scripts/pin.sh angle_commit)"
+          (cd bundles && sha256sum ./*.tar.xz | tee SHA256SUMS)
+          # Published bundles are immutable (rebuilds are not bit-identical), so
+          # never upload into an existing release, draft or not.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::release $tag already exists; bump bundle_version in angle/pin.toml (delete it first if it is an unpublished draft)"
+            exit 1
+          fi
+          # Tag the commit whose recipe built these bundles, not the default
+          # branch, and keep ANGLE releases from becoming the repo's "Latest".
+          gh release create "$tag" bundles/*.tar.xz bundles/SHA256SUMS \
+            --draft --latest=false --target "$GITHUB_SHA" --title "ANGLE bundle $tag" \
+            --notes "ANGLE $commit built by angle/build.sh at ${GITHUB_SHA}. Digests are in SHA256SUMS; copy them into angle/bundles.toml."
+          {
+            echo "### ANGLE bundle digests ($tag)"
+            echo '```'
+            cat bundles/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

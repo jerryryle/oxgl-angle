@@ -1,0 +1,3 @@
+target_cpu = "x64"
+angle_enable_d3d11 = true
+angle_enable_d3d9 = false

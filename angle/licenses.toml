@@ -1,0 +1,28 @@
+# License metadata for ANGLE third_party directories whose README.chromium is
+# missing or has no usable "License:" / "License File:" fields. bundle.py
+# prefers these entries. Every SPDX identifier must be on the allowlist in
+# deny.toml. `files` are relative to the ANGLE checkout, or to this repository
+# when prefixed with "repo:".
+[components."third_party/SwiftShader/third_party/SPIRV-Headers"]
+license = "MIT"
+files = ["third_party/SwiftShader/third_party/SPIRV-Headers/LICENSE"]
+
+[components."third_party/SwiftShader/third_party/SPIRV-Tools"]
+license = "Apache-2.0"
+files = ["third_party/SwiftShader/third_party/SPIRV-Tools/LICENSE"]
+
+[components."third_party/SwiftShader/third_party/marl"]
+license = "Apache-2.0"
+files = ["third_party/SwiftShader/third_party/marl/LICENSE"]
+
+# SwiftShader's LLVM 10 copy omits llvm/LICENSE.TXT, so the upstream
+# llvmorg-10.0.0 text is kept in this repository. Support/ adds the
+# Illinois (NCSA) System Interface Library notice and Henry Spencer's regex
+# license.
+[components."third_party/SwiftShader/third_party/llvm-10.0"]
+license = "Apache-2.0 WITH LLVM-exception, NCSA, Spencer-94"
+files = [
+    "repo:angle/license-texts/llvm-10.0.LICENSE.TXT",
+    "third_party/SwiftShader/third_party/llvm-10.0/llvm/include/llvm/Support/LICENSE.TXT",
+    "third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/Support/COPYRIGHT.regex",
+]

@@ -1,0 +1,1 @@
+libEGL libGLESv2 third_party/SwiftShader/src/Vulkan:swiftshader_libvulkan third_party/SwiftShader/src/Vulkan:icd_file
