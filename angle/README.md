@@ -77,14 +77,6 @@ cc -I ~/.cache/oxgl/angle-build/dist/angle-macos-arm64/include angle/smoke/smoke
 OXGL_ANGLE_DIR=~/.cache/oxgl/angle-build/dist/angle-macos-arm64 npm run build
 ```
 
-## Measured sizes
-
-| Platform | Checkout + build tree | Bundle (`.tar.xz`) | Unpacked `lib/` |
-|---|---|---|---|
-| macos-arm64 (M-series, 16 cores) | ~13 GB | to re-measure without WebGPU (was 7.6 MB) | to re-measure (was 28 MB) |
-| linux-x64 | first `angle-build` run | | |
-| windows-x64 | first `angle-build` run | | |
-
 ## Changing ANGLE
 
 The recipe is every file that builds or tests a bundle: `pin.toml`, `args/`, `build.sh`, `build.ps1`, `scripts/bundle.py`, `scripts/pin.sh`, `smoke/`, `licenses.toml`, `license-texts/`, and
