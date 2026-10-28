@@ -19,7 +19,7 @@ smoke-tested on arm64 runners.
 | File | Purpose |
 |---|---|
 | `pin.toml` | Recipe inputs: ANGLE commit, depot_tools commit, `bundle_version` (release tag) |
-| `bundles.toml` | Build outputs: per-platform bundle URL + sha256 that oxgl-sys downloads |
+| `bundles.toml` | Build outputs: per-platform bundle URL + sha256 that oxgl-sys downloads, and optionally a symbols archive (`symbols_url`, `symbols_sha256`) that it uses instead of the stripped libraries when `OXGL_ANGLE_SYMBOLS` is set |
 | `args/*.gn` | GN build arguments: `common.gn` plus one file per platform |
 | `args/targets.txt` | Ninja targets to build |
 | `build.sh`, `build.ps1` | Build recipe (`fetch`, `build`, `bundle`, `all`) for macOS/Linux and Windows (x64 and arm64) |
