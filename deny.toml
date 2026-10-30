@@ -1,19 +1,7 @@
-# License policy for crates in the workspace graph (see the `licensing` spec).
-# Run with `cargo deny check licenses` (part of `npm run lint`).
-#
-# cargo-deny 0.20 checks build-dependencies along with normal ones; it has no
-# option to skip them. A build-only crate whose license is not on the allowlist
-# gets a per-crate entry under `exceptions`, commented
-# "build-time only, not distributed".
-
-[graph]
-targets = [
-    "x86_64-unknown-linux-gnu",
-    "aarch64-unknown-linux-gnu",
-    "aarch64-apple-darwin",
-    "x86_64-pc-windows-msvc",
-    "aarch64-pc-windows-msvc",
-]
+# The license allowlist that angle/scripts/bundle.py checks every bundled
+# component against. It is a copy: oxgl's deny.toml is authoritative, and
+# oxgl-sys's build.rs re-checks each pinned bundle against it, so a license
+# allowed here but not there fails oxgl's build. Keep the two in step.
 
 [licenses]
 allow = [
@@ -29,11 +17,3 @@ allow = [
     "NCSA",
     "Spencer-94",
 ]
-confidence-threshold = 0.8
-# The allowlist is policy, not an inventory of current dependencies.
-unused-allowed-license = "allow"
-exceptions = []
-
-[licenses.private]
-# Workspace crates are unpublished but still checked: they must be BSD-3-Clause.
-ignore = false
