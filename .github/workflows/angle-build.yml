@@ -1,29 +1,19 @@
 # Builds the oxgl ANGLE bundles from the recipe in angle/ (pin.toml, GN args,
-# scripts, license data). On pull requests that touch the recipe it builds,
-# checks and smoke-tests all five platforms and keeps the bundles as run
-# artifacts. The arm64 Linux and Windows bundles are cross-compiled on x64
-# runners and smoke-tested on arm64 runners in the smoke job. Run manually (workflow_dispatch) from main to also create a draft
-# release, then copy the printed digests into angle/bundles.toml (see
-# angle/README.md). Published bundle versions are never rebuilt or replaced.
+# scripts, license data). Runs on every pull request and reports one aggregate
+# check, `angle-build`, which branch protection requires. A pull request that
+# changes the recipe builds, checks and smoke-tests all five platforms and keeps
+# the bundles as run artifacts; one that changes only this workflow does the
+# same without needing a new bundle_version; any other pull request skips the
+# builds. The arm64 Linux and Windows bundles are cross-compiled on x64 runners
+# and smoke-tested on arm64 runners in the smoke job. Run manually
+# (workflow_dispatch) from main to also create a draft release, then copy the
+# printed digests into oxgl's angle/bundles.toml (see angle/README.md).
+# Published bundle versions are never rebuilt or replaced.
 name: angle-build
 
 on:
   workflow_dispatch:
   pull_request:
-    # The recipe: the files that build or test a bundle. bundles.toml (outputs),
-    # the README and check_pin.py are deliberately absent. (deny.toml is too:
-    # oxgl-sys's build.rs re-checks bundle licenses against it wherever oxgl builds.)
-    paths:
-      - "angle/pin.toml"
-      - "angle/args/**"
-      - "angle/build.sh"
-      - "angle/build.ps1"
-      - "angle/scripts/bundle.py"
-      - "angle/scripts/pin.sh"
-      - "angle/smoke/**"
-      - "angle/licenses.toml"
-      - "angle/license-texts/**"
-      - ".github/workflows/angle-build.yml"
 
 concurrency:
   group: angle-build-${{ github.ref }}
@@ -32,14 +22,81 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Workflow linters, pinned to oxgl's versions. Dependabot doesn't bump these.
+  ACTIONLINT_VERSION: v1.7.12
+  ZIZMOR_VERSION: "1.31.1"
+
 jobs:
+  # Which kind of change this is. recipe: a file that builds or tests a bundle
+  # changed (it needs a new bundle_version). build: the recipe or this workflow
+  # changed (the bundles are built and smoke-tested). Same script as oxgl's
+  # ci.yml `changes` job; when the changed files can't be determined (no pull
+  # request, or the diff fails), both are true.
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      recipe: ${{ steps.match.outputs.recipe }}
+      build: ${{ steps.match.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: match
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          recipe=true build=true
+          # --no-renames lists both sides of a rename, so moving a recipe file
+          # away still counts as changing it.
+          if [ "$EVENT" = pull_request ] && files="$(git diff --no-renames --name-only "$BASE...$HEAD")" && [ -n "$files" ]; then
+            recipe=false build=false
+            while IFS= read -r f; do
+              case "$f" in
+                angle/pin.toml|angle/args/*|angle/build.sh|angle/build.ps1|angle/scripts/bundle.py|angle/scripts/pin.sh|angle/smoke/*|angle/licenses.toml|angle/license-texts/*)
+                  recipe=true build=true ;;
+                .github/workflows/angle-build.yml)
+                  build=true ;;
+              esac
+            done <<< "$files"
+          fi
+          { echo "recipe=$recipe"; echo "build=$build"; } | tee -a "$GITHUB_OUTPUT"
+
+  workflow-lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Go's checksum database verifies the module download.
+      - name: actionlint
+        run: |
+          go install "github.com/rhysd/actionlint/cmd/actionlint@$ACTIONLINT_VERSION"
+          "$(go env GOPATH)/bin/actionlint"
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
+        with:
+          tool: zizmor@${{ env.ZIZMOR_VERSION }}
+          fallback: none
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --config .github/zizmor.yml .github/workflows
+      - run: python3 angle/scripts/check_pin.py
+
   guard:
+    needs: changes
+    if: needs.changes.outputs.recipe == 'true'
     # A recipe change needs a new bundle_version; fail in seconds, not after
     # the compile. (Drafts are invisible to this read-only token; the release
     # job catches those.)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Refuse an already released bundle_version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -55,7 +112,9 @@ jobs:
           esac
 
   build:
-    needs: guard
+    # Runs on a workflow-only change too, when guard is skipped.
+    needs: [changes, guard]
+    if: ${{ !cancelled() && needs.changes.outputs.build == 'true' && contains(fromJSON('["success","skipped"]'), needs.guard.result) }}
     name: build (${{ matrix.platform }})
     strategy:
       fail-fast: false
@@ -82,6 +141,8 @@ jobs:
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
@@ -182,7 +243,9 @@ jobs:
   # Cross-compiled bundles are smoke-tested on a runner of their own
   # architecture, from the artifact the build job uploaded.
   smoke:
+    # A job reads only its direct needs, so this can't reuse build's condition.
     needs: build
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     name: smoke (${{ matrix.platform }})
     strategy:
       fail-fast: false
@@ -195,6 +258,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: angle-${{ matrix.platform }}
@@ -228,6 +293,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: bundles
@@ -245,14 +312,35 @@ jobs:
             echo "::error::release $tag already exists; bump bundle_version in angle/pin.toml (delete it first if it is an unpublished draft)"
             exit 1
           fi
-          # Tag the commit whose recipe built these bundles, not the default
-          # branch, and keep ANGLE releases from becoming the repo's "Latest".
+          # Tag the commit whose recipe built these bundles, not the default branch.
           gh release create "$tag" bundles/*.tar.xz bundles/SHA256SUMS \
-            --draft --latest=false --target "$GITHUB_SHA" --title "ANGLE bundle $tag" \
-            --notes "ANGLE $commit built by angle/build.sh at ${GITHUB_SHA}. Digests are in SHA256SUMS; copy them into angle/bundles.toml."
+            --draft --target "$GITHUB_SHA" --title "ANGLE bundle $tag" \
+            --notes "ANGLE $commit built by angle/build.sh at ${GITHUB_SHA}. Digests are in SHA256SUMS; copy them into oxgl's angle/bundles.toml."
           {
             echo "### ANGLE bundle digests ($tag)"
             echo '```'
             cat bundles/SHA256SUMS
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # The one check branch protection requires. A job may be skipped only when
+  # this change did not need it; any other skip (a broken `if:`, an upstream
+  # failure) fails the check.
+  angle-build:
+    if: always()
+    needs: [changes, workflow-lint, guard, build, smoke, release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every needed job to succeed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          echo "$RESULTS" | jq -e --arg event "$EVENT" '
+            def ok(skippable): .result == "success" or (.result == "skipped" and skippable);
+            .changes.outputs as $c
+            | (.changes | ok(false)) and (.["workflow-lint"] | ok(false))
+              and (.guard | ok($c.recipe == "false"))
+              and (.build | ok($c.build == "false"))
+              and (.smoke | ok($c.build == "false"))
+              and (.release | ok($event == "pull_request"))'
