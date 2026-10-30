@@ -59,6 +59,8 @@ allowed here but not there fails oxgl's build; keep the two in step.
 (paths relative to its root) before `gn gen`. A patch already applied by an
 earlier build is skipped; one that no longer applies fails the build, so an
 ANGLE update that moves the patched code has to update the patch.
+`BUILD_INFO.json` does not list the patches: a released bundle was built with
+the patches in the commit its tag points to.
 
 | Patch | Why |
 |---|---|
@@ -90,7 +92,8 @@ in an oxgl checkout.
 The recipe is every file that builds or tests a bundle: `pin.toml`, `args/`,
 `patches/`, `build.sh`, `build.ps1`, `scripts/bundle.py`, `scripts/pin.sh`, `smoke/`,
 `licenses.toml` and `license-texts/`. Any recipe change (a new ANGLE commit,
-GN args, targets, scripts, license data) gets a new `bundle_version`:
+GN args, targets, source patches, scripts, license data) gets a new
+`bundle_version`:
 published bundles are never rebuilt or replaced, because rebuilds are not
 bit-identical and older oxgl commits pin the old digests.
 
