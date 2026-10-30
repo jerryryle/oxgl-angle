@@ -54,10 +54,16 @@ out_dir() { echo "$work/angle/out/oxgl-$1"; }
 apply_patches() {
   local patch
   for patch in "$here"/patches/*.patch; do
+    [[ -e "$patch" ]] || continue   # no patches
     if git -C "$work/angle" apply --reverse --check "$patch" 2>/dev/null; then
       continue
     fi
-    git -C "$work/angle" apply "$patch"
+    git -C "$work/angle" apply "$patch" || {
+      echo "$patch does not apply. Either the pinned ANGLE sources changed (update the patch)," >&2
+      echo "or an earlier build applied an older version of it (restore the patched files in" >&2
+      echo "$work/angle with git checkout -- <file> in their repository, then rerun)." >&2
+      return 1
+    }
   done
 }
 

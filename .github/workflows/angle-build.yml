@@ -1,14 +1,14 @@
 # Builds the oxgl ANGLE bundles from the recipe in angle/ (pin.toml, GN args,
-# scripts, license data). Runs on every pull request and reports one aggregate
-# check, `angle-build`, which branch protection requires. A pull request that
-# changes the recipe builds, checks and smoke-tests all five platforms and keeps
-# the bundles as run artifacts; one that changes only this workflow does the
-# same without needing a new bundle_version; any other pull request skips the
-# builds. The arm64 Linux and Windows bundles are cross-compiled on x64 runners
-# and smoke-tested on arm64 runners in the smoke job. Run manually
-# (workflow_dispatch) from main to also create a draft release, then copy the
-# printed digests into oxgl's angle/bundles.toml (see angle/README.md).
-# Published bundle versions are never rebuilt or replaced.
+# source patches, scripts, license data). Runs on every pull request and reports
+# one aggregate check, `angle-build`, which branch protection requires. A pull
+# request that changes the recipe builds, checks and smoke-tests all five
+# platforms and keeps the bundles as run artifacts; one that changes only this
+# workflow does the same without needing a new bundle_version; any other pull
+# request skips the builds. The arm64 Linux and Windows bundles are
+# cross-compiled on x64 runners and smoke-tested on arm64 runners in the smoke
+# job. Run manually (workflow_dispatch) from main to also create a draft
+# release, then copy the printed digests into oxgl's angle/bundles.toml (see
+# angle/README.md). Published bundle versions are never rebuilt or replaced.
 name: angle-build
 
 on:
