@@ -52,7 +52,10 @@ function Apply-Patches {
   foreach ($patch in Get-ChildItem "$here\patches\*.patch") {
     & git -C "$work\angle" apply --reverse --check $patch.FullName 2>$null
     if ($LASTEXITCODE -eq 0) { continue }
-    Invoke-Checked git -C "$work\angle" apply $patch.FullName
+    & git -C "$work\angle" apply $patch.FullName
+    if ($LASTEXITCODE) {
+      throw "$($patch.FullName) does not apply. Either the pinned ANGLE sources changed (update the patch), or an earlier build applied an older version of it (restore the patched files in $work\angle with git checkout -- <file> in their repository, then rerun)."
+    }
   }
 }
 
