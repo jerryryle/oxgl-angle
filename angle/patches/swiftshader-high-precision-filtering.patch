@@ -1,0 +1,20 @@
+diff --git a/third_party/SwiftShader/src/Vulkan/BUILD.gn b/third_party/SwiftShader/src/Vulkan/BUILD.gn
+index 852068c..780fd8e 100644
+--- a/third_party/SwiftShader/src/Vulkan/BUILD.gn
++++ b/third_party/SwiftShader/src/Vulkan/BUILD.gn
+@@ -63,11 +63,10 @@ config("swiftshader_libvulkan_private_config") {
+     "SWIFTSHADER_ZERO_INITIALIZE_DEVICE_MEMORY",
+   ]
+ 
+-  if (build_with_chromium) {
+-    # Chromium requires higher precision filtering to pass the layout tests with SwiftShader.
+-    # http://crbug.com/726075
+-    defines += [ "SWIFTSHADER_HIGH_PRECISION_FILTERING" ]
+-  }
++  # Chromium requires higher precision filtering to pass the layout tests with SwiftShader.
++  # http://crbug.com/726075
++  # oxgl: enabled outside Chromium too, so that WebGL filters as Chrome does.
++  defines += [ "SWIFTSHADER_HIGH_PRECISION_FILTERING" ]
+ }
+ 
+ swiftshader_source_set("swiftshader_libvulkan_headers") {

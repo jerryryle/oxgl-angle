@@ -19,6 +19,7 @@ arm64 runners.
 | `pin.toml` | Recipe inputs: ANGLE commit, depot_tools commit, `bundle_version` (release tag) |
 | `args/*.gn` | GN build arguments: `common.gn` plus one file per platform |
 | `args/targets.txt` | Ninja targets to build |
+| `patches/*.patch` | Source patches applied to the ANGLE checkout before `gn gen`, for settings no GN arg reaches (see [Source patches](#source-patches)) |
 | `build.sh`, `build.ps1` | Build recipe (`fetch`, `build`, `bundle`, `all`) for macOS/Linux and Windows (x64 and arm64) |
 | `scripts/bundle.py` | Assembles the bundle and enforces the outcome checks |
 | `scripts/check_pin.py` | Validates `pin.toml` |
@@ -52,6 +53,17 @@ The GN-arg and license checks also run right after `gn gen`
 pinned bundle's component licenses against its own `deny.toml`, so a license
 allowed here but not there fails oxgl's build; keep the two in step.
 
+## Source patches
+
+`build.sh` and `build.ps1` apply each `patches/*.patch` to the ANGLE checkout
+(paths relative to its root) before `gn gen`. A patch already applied by an
+earlier build is skipped; one that no longer applies fails the build, so an
+ANGLE update that moves the patched code has to update the patch.
+
+| Patch | Why |
+|---|---|
+| `swiftshader-high-precision-filtering.patch` | Defines `SWIFTSHADER_HIGH_PRECISION_FILTERING` for SwiftShader's Vulkan driver. SwiftShader sets it only in Chromium builds (crbug.com/726075); without it, `LINEAR` filtering of 8-bit textures uses 16-bit fixed-point math and a white texel samples as about 0.99994, not 1.0, which fails Khronos `conformance/uniforms/uniform-default-values.html`. Chromium's `build/` has no GN arg for extra compiler flags outside its cros and unbundle toolchains, hence a patch. |
+
 ## Building locally
 
 Needs Git, Python 3.11+, and the platform toolchain: on macOS, full Xcode plus
@@ -76,7 +88,7 @@ in an oxgl checkout.
 ## Changing ANGLE
 
 The recipe is every file that builds or tests a bundle: `pin.toml`, `args/`,
-`build.sh`, `build.ps1`, `scripts/bundle.py`, `scripts/pin.sh`, `smoke/`,
+`patches/`, `build.sh`, `build.ps1`, `scripts/bundle.py`, `scripts/pin.sh`, `smoke/`,
 `licenses.toml` and `license-texts/`. Any recipe change (a new ANGLE commit,
 GN args, targets, scripts, license data) gets a new `bundle_version`:
 published bundles are never rebuilt or replaced, because rebuilds are not
