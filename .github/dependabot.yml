@@ -1,0 +1,12 @@
+# Proposes bumps for the SHA-pinned actions in .github/workflows (keeping the
+# trailing version comments in sync). Monthly: each bump builds and
+# smoke-tests all five bundles.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]

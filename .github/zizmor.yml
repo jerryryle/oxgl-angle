@@ -1,0 +1,7 @@
+# Settings for the zizmor audit in angle-build.yml's workflow-lint job.
+rules:
+  unpinned-uses:
+    config:
+      # Every action, first-party included, is pinned to a full commit SHA.
+      policies:
+        "*": hash-pin
