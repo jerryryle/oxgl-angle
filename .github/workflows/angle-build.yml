@@ -56,7 +56,7 @@ jobs:
             recipe=false build=false
             while IFS= read -r f; do
               case "$f" in
-                angle/pin.toml|angle/args/*|angle/build.sh|angle/build.ps1|angle/scripts/bundle.py|angle/scripts/pin.sh|angle/smoke/*|angle/licenses.toml|angle/license-texts/*)
+                angle/pin.toml|angle/args/*|angle/patches/*|angle/build.sh|angle/build.ps1|angle/scripts/bundle.py|angle/scripts/pin.sh|angle/smoke/*|angle/licenses.toml|angle/license-texts/*)
                   recipe=true build=true ;;
                 .github/workflows/angle-build.yml)
                   build=true ;;
