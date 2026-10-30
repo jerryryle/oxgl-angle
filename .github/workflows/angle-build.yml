@@ -344,3 +344,4 @@ jobs:
               and (.build | ok($c.build == "false"))
               and (.smoke | ok($c.build == "false"))
               and (.release | ok($event == "pull_request"))'
+# Test comment (angle-repo-separation verification; not merged).
