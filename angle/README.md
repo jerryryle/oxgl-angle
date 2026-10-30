@@ -123,3 +123,43 @@ old digests.
 
 A deleted or broken release asset is replaced the same way, under a new
 `bundle_version`.
+
+### Known upstream issues
+
+ANGLE behavior oxgl does not work around, listed so that every ANGLE update
+rechecks it.
+
+#### Conformance failures
+
+Khronos conformance pages that fail because of ANGLE, or of the SwiftShader it
+bundles. Each is an expected failure in
+`conformance/expectations.txt`, tagged `ANGLE:` or `SwiftShader:`. Last checked
+against `angle_commit` `127e783de334` (`chromium/8078`).
+
+| Page (suites) | Cause | Where |
+| --- | --- | --- |
+| `conformance/glsl/misc/shader-with-double-underscore.html` (webgl1, webgl2) | ANGLE rejects identifiers containing `__` in WebGL shaders; the test expects them to compile, as newer GLSL ES allows. Still so on ANGLE `main` (October 2026). | `TParseContext::checkIsNotReserved`, `src/compiler/translator/ParseContext.cpp` |
+| `conformance2/textures/misc/immutable-tex-render-feedback.html` (webgl2) | A mutable texture's level is attached while its range is empty (`TEXTURE_BASE_LEVEL` 1, `TEXTURE_MAX_LEVEL` 0); ANGLE reports the framebuffer complete instead of `FRAMEBUFFER_INCOMPLETE_ATTACHMENT` (OpenGL ES 3.0 §4.4.4). Fails on Metal too. | ANGLE's framebuffer completeness checks |
+| `conformance/uniforms/uniform-default-values.html` (webgl1, webgl2) | SwiftShader samples a white `UNORM8` texel as about 0.99994, not exactly 1.0. Passes on GPU backends. | SwiftShader's sampler |
+| `deqp/functional/gles3/shaderoperator/unary_operator_00.html` (webgl2) | SwiftShader fails `shaderop.unary_operator.minus.lowp_uint_vertex`. Passes on GPU backends. | SwiftShader |
+
+After changing `angle_commit`, run the full suite (`npm run conformance`) with
+the new bundle. A page here that now passes is reported as `expected FAIL, got
+PASS`, which fails the run: remove its expectation (`--update`) and its row,
+and update the commit above. To check one page,
+`npm run conformance -- --filter <page>`.
+
+#### Runtime issues
+
+ANGLE behavior that oxgl's README documents under "Known issues". Last checked
+against `angle_commit` `127e783de334`; still present on `chromium/8127` and
+`main` (October 2026).
+
+| Issue | Cause | Where | When it is fixed |
+| --- | --- | --- | --- |
+| SwiftShader initialization briefly changes process-global state (`VK_ICD_FILENAMES`, and the working directory on Linux and Windows) | ANGLE points the Vulkan loader at SwiftShader's ICD through the environment and working directory | `angle::vk::ScopedVkLoaderEnvironment`, used in `src/libANGLE/renderer/vulkan/vk_renderer.cpp` | Remove the entry from oxgl's README "Known issues" |
+| Each thread that uses EGL leaves 72 bytes behind | ANGLE allocates each thread's `egl::Thread` and Display TLS data on its first EGL call and never frees them ("Global thread intentionally leaked") | `src/libGLESv2/global_state.cpp`, `egl::GetCurrentThread` | Remove the README "Known issues" entry and the `leak:egl::GetCurrentThread` line in `.github/lsan-suppressions.txt` |
+
+After changing `angle_commit`, check that the code above is still in the new
+commit's sources. For the leak, also run the `asan` job without its
+suppression: it reports the 72-byte allocations for as long as ANGLE makes them.
