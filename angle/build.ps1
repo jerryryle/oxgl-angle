@@ -45,8 +45,20 @@ function Fetch {
   } finally { Pop-Location }
 }
 
+# Applies patches\*.patch (paths relative to the ANGLE root) to the checkout.
+# A patch already applied by an earlier build is skipped; one that applies
+# neither way fails the build, since the pinned sources no longer match it.
+function Apply-Patches {
+  foreach ($patch in Get-ChildItem "$here\patches\*.patch") {
+    & git -C "$work\angle" apply --reverse --check $patch.FullName 2>$null
+    if ($LASTEXITCODE -eq 0) { continue }
+    Invoke-Checked git -C "$work\angle" apply $patch.FullName
+  }
+}
+
 function Build {
   New-Item -ItemType Directory -Force $out | Out-Null
+  Apply-Patches
   (Get-Content "$here\args\common.gn") + (Get-Content "$here\args\$platform.gn") | Set-Content "$out\args.gn"
   $targets = (Get-Content "$here\args\targets.txt") -split '\s+' | Where-Object { $_ }
   Push-Location "$work\angle"

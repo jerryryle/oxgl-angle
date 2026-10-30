@@ -48,10 +48,24 @@ fetch() {
 
 out_dir() { echo "$work/angle/out/oxgl-$1"; }
 
+# Applies patches/*.patch (paths relative to the ANGLE root) to the checkout.
+# A patch already applied by an earlier build is skipped; one that applies
+# neither way fails the build, since the pinned sources no longer match it.
+apply_patches() {
+  local patch
+  for patch in "$here"/patches/*.patch; do
+    if git -C "$work/angle" apply --reverse --check "$patch" 2>/dev/null; then
+      continue
+    fi
+    git -C "$work/angle" apply "$patch"
+  done
+}
+
 build() {
   local platform="$1" out
   out="$(out_dir "$platform")"
   mkdir -p "$out"
+  apply_patches
   if [[ "$platform" == linux-arm64 ]]; then
     # ANGLE's DEPS hooks install only the x86/x64 sysroots; fetch the arm64 one
     # (pinned by build/linux/sysroot_scripts/sysroots.json) ourselves.
