@@ -12,3 +12,4 @@ angle_enable_perfetto = false
 # ANGLE enables its WebGPU backend by default on macOS and Windows; it links
 # Dawn (and DXC on Windows), which oxgl does not use.
 angle_enable_wgpu = false
+# Test comment (angle-repo-separation verification; not merged).
