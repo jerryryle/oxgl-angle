@@ -1,0 +1,58 @@
+diff --git a/third_party/SwiftShader/src/Pipeline/VertexRoutine.cpp b/third_party/SwiftShader/src/Pipeline/VertexRoutine.cpp
+index eb556c9..ee745db 100644
+--- a/third_party/SwiftShader/src/Pipeline/VertexRoutine.cpp
++++ b/third_party/SwiftShader/src/Pipeline/VertexRoutine.cpp
+@@ -170,6 +170,25 @@ void VertexRoutine::computeCullMask()
+ 	}
+ }
+ 
++// Copies one vertex attribute's `bytes` bytes from `from` to `to`, in the
++// widest pieces that fit, so the read never goes past the attribute.
++static void copyAttribute(Pointer<Byte> to, Pointer<Byte> from, int bytes)
++{
++	int i = 0;
++	for(; i + 4 <= bytes; i += 4)
++	{
++		*Pointer<Int>(to + i) = *Pointer<Int>(from + i);
++	}
++	for(; i + 2 <= bytes; i += 2)
++	{
++		*Pointer<Short>(to + i) = *Pointer<Short>(from + i);
++	}
++	for(; i < bytes; i++)
++	{
++		*Pointer<Byte>(to + i) = *Pointer<Byte>(from + i);
++	}
++}
++
+ Vector4f VertexRoutine::readStream(Pointer<Byte> &buffer, UInt &stride, const Stream &stream, Pointer<UInt> &batch,
+                                    bool robustBufferAccess, UInt &robustnessSize, Int baseVertex)
+ {
+@@ -206,6 +225,27 @@ Vector4f VertexRoutine::readStream(Pointer<Byte> &buffer, UInt &stride, const St
+ 		source3 = IfThenElse(limits.w > robustnessSize, zeroSource, source3);
+ 	}
+ 
++	// The format cases below load 4, 8 or 16 bytes per attribute whatever the
++	// format's own size (a Float4 for VK_FORMAT_R32G32_SFLOAT, a Byte4 for
++	// VK_FORMAT_R8_UNORM), so for a vertex at the end of a buffer that ends
++	// at the end of its memory they read past the allocation. Read each
++	// attribute's own bytes into a zeroed 16-byte local instead.
++	UInt4 attribute0(0);
++	UInt4 attribute1(0);
++	UInt4 attribute2(0);
++	UInt4 attribute3(0);
++	if(format.bytes() < 16)
++	{
++		copyAttribute(As<Pointer<Byte>>(&attribute0), source0, format.bytes());
++		copyAttribute(As<Pointer<Byte>>(&attribute1), source1, format.bytes());
++		copyAttribute(As<Pointer<Byte>>(&attribute2), source2, format.bytes());
++		copyAttribute(As<Pointer<Byte>>(&attribute3), source3, format.bytes());
++		source0 = As<Pointer<Byte>>(&attribute0);
++		source1 = As<Pointer<Byte>>(&attribute1);
++		source2 = As<Pointer<Byte>>(&attribute2);
++		source3 = As<Pointer<Byte>>(&attribute3);
++	}
++
+ 	int componentCount = format.componentCount();
+ 	bool normalized = !format.isUnnormalizedInteger();
+ 	bool isNativeFloatAttrib = (stream.attribType == Spirv::ATTRIBTYPE_FLOAT) || normalized;
