@@ -1,0 +1,315 @@
+diff --git a/third_party/SwiftShader/src/Reactor/LLVMJIT.cpp b/third_party/SwiftShader/src/Reactor/LLVMJIT.cpp
+index 6db6ca1..1ac0dea 100644
+--- a/third_party/SwiftShader/src/Reactor/LLVMJIT.cpp
++++ b/third_party/SwiftShader/src/Reactor/LLVMJIT.cpp
+@@ -43,10 +43,11 @@ __pragma(warning(push))
+ #else
+ #include "llvm/ExecutionEngine/Orc/ObjectLinkingLayer.h"
+ #endif
+-#include "llvm/ExecutionEngine/SectionMemoryManager.h"
++#include "llvm/ExecutionEngine/RTDyldMemoryManager.h"
+ #include "llvm/IR/DiagnosticInfo.h"
+ #include "llvm/IR/Verifier.h"
+ #include "llvm/Support/CommandLine.h"
++#include "llvm/Support/Memory.h"
+ #if LLVM_VERSION_MAJOR >= 18
+ #include "llvm/TargetParser/Host.h"
+ #else
+@@ -339,76 +340,141 @@ LLVMOptLevel JITGlobals::toLLVM(int level)
+ #undef CodeGenOptLevel
+ }
+ 
+-class MemoryMapper final : public llvm::SectionMemoryManager::MemoryMapper
++#if USE_LEGACY_OBJECT_LINKING_LAYER
++// MemoryManager allocates all the sections of a routine (code, read-only data
++// and read-write data) from a single block of pages. Mapping each section
++// separately lets the OS place them arbitrarily far apart, beyond the reach of
++// the PC-relative relocations between them, such as AArch64's ADRP (+/-4 GiB),
++// which RuntimeDyld does not range-check in release builds.
++class MemoryManager final : public llvm::RTDyldMemoryManager
+ {
+ public:
+-	MemoryMapper() {}
+-	~MemoryMapper() final {}
++	MemoryManager() {}
+ 
+-	llvm::sys::MemoryBlock allocateMappedMemory(
+-	    llvm::SectionMemoryManager::AllocationPurpose purpose,
+-	    size_t numBytes, const llvm::sys::MemoryBlock *const nearBlock,
+-	    unsigned flags, std::error_code &errorCode) final
++	~MemoryManager() final
+ 	{
+-		errorCode = std::error_code();
++		if(block)
++		{
++			rr::deallocateMemoryPages(block, blockSize);
++		}
++	}
+ 
+-		// Round up numBytes to page size.
+-		size_t pageSize = rr::memoryPageSize();
+-		numBytes = (numBytes + pageSize - 1) & ~(pageSize - 1);
+-
+-		bool need_exec =
+-		    purpose == llvm::SectionMemoryManager::AllocationPurpose::Code;
+-		void *addr = rr::allocateMemoryPages(
+-		    numBytes, flagsToPermissions(flags), need_exec);
+-		if(!addr)
+-			return llvm::sys::MemoryBlock();
+-		return llvm::sys::MemoryBlock(addr, numBytes);
++	bool needsToReserveAllocationSpace() final { return true; }
++
++#	if LLVM_VERSION_MAJOR >= 16
++	void reserveAllocationSpace(uintptr_t codeSize, llvm::Align codeAlign,
++	                            uintptr_t roDataSize, llvm::Align roDataAlign,
++	                            uintptr_t rwDataSize, llvm::Align rwDataAlign) final
++	{
++		reserve(codeSize, codeAlign.value(), roDataSize, roDataAlign.value(), rwDataSize, rwDataAlign.value());
++	}
++#	else
++	void reserveAllocationSpace(uintptr_t codeSize, uint32_t codeAlign,
++	                            uintptr_t roDataSize, uint32_t roDataAlign,
++	                            uintptr_t rwDataSize, uint32_t rwDataAlign) final
++	{
++		reserve(codeSize, codeAlign, roDataSize, roDataAlign, rwDataSize, rwDataAlign);
+ 	}
++#	endif
+ 
+-	std::error_code protectMappedMemory(const llvm::sys::MemoryBlock &block,
+-	                                    unsigned flags)
++	uint8_t *allocateCodeSection(uintptr_t size, unsigned alignment,
++	                             unsigned sectionID, llvm::StringRef sectionName) final
+ 	{
+-		// Round down base address to align with a page boundary. This matches
+-		// DefaultMMapper behavior.
+-		void *addr = block.base();
+-		size_t size = block.allocatedSize();
+-		size_t pageSize = rr::memoryPageSize();
+-		addr = reinterpret_cast<void *>(
+-		    reinterpret_cast<uintptr_t>(addr) & ~(pageSize - 1));
+-		size += reinterpret_cast<uintptr_t>(block.base()) -
+-		        reinterpret_cast<uintptr_t>(addr);
++		return code.allocate(size, alignment);
++	}
+ 
+-		rr::protectMemoryPages(addr, size, flagsToPermissions(flags));
+-		return std::error_code();
++	uint8_t *allocateDataSection(uintptr_t size, unsigned alignment,
++	                             unsigned sectionID, llvm::StringRef sectionName,
++	                             bool isReadOnly) final
++	{
++		return isReadOnly ? roData.allocate(size, alignment) : rwData.allocate(size, alignment);
+ 	}
+ 
+-	std::error_code releaseMappedMemory(llvm::sys::MemoryBlock &block)
++	bool finalizeMemory(std::string *errorMessage) final
+ 	{
+-		size_t size = block.allocatedSize();
++		if(code.size != 0)
++		{
++			rr::protectMemoryPages(code.base, code.size, rr::PERMISSION_READ | rr::PERMISSION_EXECUTE);
++			// Instruction caches are not coherent with data writes on all
++			// architectures, such as ARM.
++			llvm::sys::Memory::InvalidateInstructionCache(code.base, code.used);
++		}
+ 
+-		rr::deallocateMemoryPages(block.base(), size);
+-		return std::error_code();
++		if(roData.size != 0)
++		{
++			rr::protectMemoryPages(roData.base, roData.size, rr::PERMISSION_READ);
++		}
++
++		return false;  // No error.
+ 	}
+ 
+ private:
+-	int flagsToPermissions(unsigned flags)
++	// Group is the range of the block that holds the sections of one kind.
++	struct Group
+ 	{
+-		int result = 0;
+-		if(flags & llvm::sys::Memory::MF_READ)
++		uint8_t *base = nullptr;
++		size_t size = 0;
++		size_t used = 0;
++
++		// Returns the next bytes of the group, aligned to alignment, or nullptr if
++		// they do not fit.
++		uint8_t *allocate(uintptr_t bytes, unsigned alignment)
+ 		{
+-			result |= rr::PERMISSION_READ;
++			uintptr_t mask = std::max(alignment, 1u) - 1;
++			size_t offset = ((reinterpret_cast<uintptr_t>(base) + used + mask) & ~mask) - reinterpret_cast<uintptr_t>(base);
++			if(offset + bytes > size)
++			{
++				return nullptr;
++			}
++
++			used = offset + bytes;
++			return base + offset;
+ 		}
+-		if(flags & llvm::sys::Memory::MF_WRITE)
++	};
++
++	// Maps one block of pages for all the sections of an object. RuntimeDyld
++	// calls reserveAllocationSpace() once per object, before it allocates any
++	// section, with the total size of each kind of section. Each group starts on
++	// its own page so that finalizeMemory() can protect it separately, and is
++	// padded by its alignment because the totals assume an aligned start.
++	void reserve(uintptr_t codeSize, uint32_t codeAlign,
++	             uintptr_t roDataSize, uint32_t roDataAlign,
++	             uintptr_t rwDataSize, uint32_t rwDataAlign)
++	{
++		size_t pageSize = rr::memoryPageSize();
++		auto groupSize = [&](uintptr_t size, uint32_t alignment) -> size_t {
++			return size ? (size + alignment + pageSize - 1) & ~(pageSize - 1) : 0;
++		};
++
++		code.size = groupSize(codeSize, codeAlign);
++		roData.size = groupSize(roDataSize, roDataAlign);
++		rwData.size = groupSize(rwDataSize, rwDataAlign);
++		blockSize = code.size + roData.size + rwData.size;
++		if(blockSize == 0)
+ 		{
+-			result |= rr::PERMISSION_WRITE;
++			return;
+ 		}
+-		if(flags & llvm::sys::Memory::MF_EXEC)
++
++		block = reinterpret_cast<uint8_t *>(rr::allocateMemoryPages(
++		    blockSize, rr::PERMISSION_READ | rr::PERMISSION_WRITE, code.size != 0));
++		if(!block)
+ 		{
+-			result |= rr::PERMISSION_EXECUTE;
++			code.size = roData.size = rwData.size = blockSize = 0;
++			return;
+ 		}
+-		return result;
++
++		code.base = block;
++		roData.base = code.base + code.size;
++		rwData.base = roData.base + roData.size;
+ 	}
++
++	uint8_t *block = nullptr;
++	size_t blockSize = 0;
++	Group code;
++	Group roData;
++	Group rwData;
+ };
++#endif  // USE_LEGACY_OBJECT_LINKING_LAYER
+ 
+ template<typename T>
+ T alignUp(T val, T alignment)
+@@ -808,8 +874,8 @@ public:
+ 	    , session(std::move(Unwrap(llvm::orc::SelfExecutorProcessControl::Create())))
+ #endif
+ #if USE_LEGACY_OBJECT_LINKING_LAYER
+-	    , objectLayer(session, [this]() {
+-		    return std::make_unique<llvm::SectionMemoryManager>(&memoryMapper);
++	    , objectLayer(session, []() {
++		    return std::make_unique<MemoryManager>();
+ 	    })
+ #else
+ 	    , objectLayer(session, llvm::cantFail(llvm::jitlink::InProcessMemoryManager::Create()))
+@@ -929,7 +995,6 @@ public:
+ private:
+ 	std::string name;
+ 	llvm::orc::ExecutionSession session;
+-	MemoryMapper memoryMapper;
+ #if USE_LEGACY_OBJECT_LINKING_LAYER
+ 	llvm::orc::RTDyldObjectLinkingLayer objectLayer;
+ #else
+diff --git a/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp b/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp
+index 0efe654..d64c46c 100644
+--- a/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp
++++ b/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp
+@@ -26,6 +26,16 @@
+ #include <thread>
+ #include <tuple>
+ 
++#if defined(_WIN32)
++#	ifndef WIN32_LEAN_AND_MEAN
++#		define WIN32_LEAN_AND_MEAN
++#	endif
++#	ifndef NOMINMAX
++#		define NOMINMAX
++#	endif
++#	include <windows.h>
++#endif
++
+ using namespace rr;
+ 
+ using float4 = float[4];
+@@ -3625,6 +3635,43 @@ TEST(ReactorUnitTests, LoadFromConstantData)
+ 	EXPECT_EQ(result, value);
+ }
+ 
++// A routine's code reaches its constant data with PC-relative relocations of
++// limited reach, such as AArch64's ADRP (+/-4 GiB). The JIT used to map each
++// section separately, so on Windows the data could land beyond that reach and
++// the routine read its constants from the wrong address. This test checks that
++// the constant data lies in the same block of pages as the code.
++TEST(ReactorUnitTests, ConstantDataIsNearCode)
++{
++	const int value = 123;
++
++	FunctionT<const void *()> function;
++	{
++		Return(ConstantData(&value, sizeof(value)));
++	}
++
++	auto routine = function(testName().c_str());
++	const void *data = routine();
++	const void *code = reinterpret_cast<const void *>(routine.getEntry());
++	EXPECT_EQ(*static_cast<const int *>(data), value);
++
++	// The test routine is tiny, so its sections span a few pages at most.
++	const uintptr_t distance = (data > code)
++	                               ? reinterpret_cast<uintptr_t>(data) - reinterpret_cast<uintptr_t>(code)
++	                               : reinterpret_cast<uintptr_t>(code) - reinterpret_cast<uintptr_t>(data);
++	EXPECT_LT(distance, uintptr_t(1) << 20);
++
++#if defined(_WIN32)
++	// Separately mapped sections often land next to each other anyway, so the
++	// distance check cannot tell them from one mapping. Windows records the base
++	// of each mapping, which can.
++	MEMORY_BASIC_INFORMATION codeInfo = {};
++	MEMORY_BASIC_INFORMATION dataInfo = {};
++	ASSERT_NE(VirtualQuery(code, &codeInfo, sizeof(codeInfo)), 0u);
++	ASSERT_NE(VirtualQuery(data, &dataInfo, sizeof(dataInfo)), 0u);
++	EXPECT_EQ(codeInfo.AllocationBase, dataInfo.AllocationBase);
++#endif
++}
++
+ TEST(ReactorUnitTests, Multithreaded_Function)
+ {
+ 	constexpr int numThreads = 8;
+diff --git a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp b/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp
+index 440ab41..7a57225 100644
+--- a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp
++++ b/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp
+@@ -438,7 +438,8 @@ void RuntimeDyldELF::resolveAArch64Relocation(const SectionEntry &Section,
+         ((Value + Addend) & ~0xfffULL) - (FinalAddress & ~0xfffULL);
+ 
+     // Check that -2^32 <= X < 2^32
+-    assert(isInt<33>(Result) && "overflow check failed for relocation");
++    if (!isInt<33>(Result))
++      report_fatal_error("R_AARCH64_ADR_PREL_PG_HI21 out of range");
+ 
+     // Immediate goes in bits 30:29 + 5:23 of ADRP instruction, taken
+     // from bits 32:12 of X.
+diff --git a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldCOFFAArch64.h b/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldCOFFAArch64.h
+index a94f54f..1504b8c 100644
+--- a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldCOFFAArch64.h
++++ b/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldCOFFAArch64.h
+@@ -257,6 +257,8 @@ public:
+     case COFF::IMAGE_REL_ARM64_PAGEBASE_REL21: {
+       // The page base of the target, for ADRP instruction.
+       Value += RE.Addend;
++      if (!isInt<33>((Value & ~0xfffULL) - (FinalAddress & ~0xfffULL)))
++        report_fatal_error("IMAGE_REL_ARM64_PAGEBASE_REL21 out of range");
+       write32AArch64Addr(Target, Value, FinalAddress, 12);
+       break;
+     }
