@@ -56,3 +56,561 @@ index eb556c9..ee745db 100644
  	int componentCount = format.componentCount();
  	bool normalized = !format.isUnnormalizedInteger();
  	bool isNativeFloatAttrib = (stream.attribType == Spirv::ATTRIBTYPE_FLOAT) || normalized;
+diff --git a/third_party/SwiftShader/tests/VulkanUnitTests/BUILD.gn b/third_party/SwiftShader/tests/VulkanUnitTests/BUILD.gn
+index 1adc6f0..66f6874 100644
+--- a/third_party/SwiftShader/tests/VulkanUnitTests/BUILD.gn
++++ b/third_party/SwiftShader/tests/VulkanUnitTests/BUILD.gn
+@@ -32,6 +32,7 @@ test("swiftshader_vulkan_unittests") {
+     "DrawTests.cpp"
+     "Driver.cpp"
+     "main.cpp"
++    "VertexInputTests.cpp"
+   ]
+ 
+   include_dirs = [
+diff --git a/third_party/SwiftShader/tests/VulkanUnitTests/CMakeLists.txt b/third_party/SwiftShader/tests/VulkanUnitTests/CMakeLists.txt
+index 0e53bd4..0f0c02e 100644
+--- a/third_party/SwiftShader/tests/VulkanUnitTests/CMakeLists.txt
++++ b/third_party/SwiftShader/tests/VulkanUnitTests/CMakeLists.txt
+@@ -29,6 +29,7 @@ set(VULKAN_UNIT_TESTS_SRC_FILES
+     Driver.cpp
+     Driver.hpp
+     main.cpp
++    VertexInputTests.cpp
+     VkGlobalFuncs.hpp
+     VkInstanceFuncs.hpp
+ )
+diff --git a/third_party/SwiftShader/tests/VulkanUnitTests/VertexInputTests.cpp b/third_party/SwiftShader/tests/VulkanUnitTests/VertexInputTests.cpp
+new file mode 100644
+index 0000000..0ed49f6
+--- /dev/null
++++ b/third_party/SwiftShader/tests/VulkanUnitTests/VertexInputTests.cpp
+@@ -0,0 +1,472 @@
++// Copyright 2026 The SwiftShader Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//    http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include "Driver.hpp"
++
++#include "gtest/gtest.h"
++
++#include "spirv-tools/libspirv.hpp"
++
++#include <algorithm>
++#include <cstring>
++#include <vector>
++
++#if defined(_WIN32)
++#	ifndef WIN32_LEAN_AND_MEAN
++#		define WIN32_LEAN_AND_MEAN
++#	endif
++#	include <windows.h>
++#else
++#	include <sys/mman.h>
++#	include <unistd.h>
++#endif
++
++#define VK_ASSERT(x) ASSERT_EQ(x, VK_SUCCESS)
++
++namespace {
++
++// GuardedMemory maps `size` bytes of read-write memory followed by `size`
++// bytes that cannot be accessed, so that any read past the end of the
++// read-write part faults.
++class GuardedMemory
++{
++public:
++	explicit GuardedMemory(size_t size)
++	    : size(size)
++	{
++#if defined(_WIN32)
++		void *mapping = VirtualAlloc(nullptr, 2 * size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
++		DWORD oldProtection = 0;
++		if(mapping && VirtualProtect(static_cast<uint8_t *>(mapping) + size, size, PAGE_NOACCESS, &oldProtection))
++		{
++			memory = mapping;
++		}
++#else
++		void *mapping = mmap(nullptr, 2 * size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++		if(mapping != MAP_FAILED && mprotect(static_cast<uint8_t *>(mapping) + size, size, PROT_NONE) == 0)
++		{
++			memory = mapping;
++		}
++#endif
++	}
++
++	~GuardedMemory()
++	{
++		if(memory)
++		{
++#if defined(_WIN32)
++			VirtualFree(memory, 0, MEM_RELEASE);
++#else
++			munmap(memory, 2 * size);
++#endif
++		}
++	}
++
++	// Returns the start of the read-write part, or nullptr if mapping failed.
++	void *data() const { return memory; }
++
++	// Returns the size of the system's memory pages.
++	static size_t pageSize()
++	{
++#if defined(_WIN32)
++		SYSTEM_INFO systemInfo;
++		GetSystemInfo(&systemInfo);
++		return systemInfo.dwPageSize;
++#else
++		return static_cast<size_t>(sysconf(_SC_PAGESIZE));
++#endif
++	}
++
++private:
++	const size_t size;
++	void *memory = nullptr;
++};
++
++// Returns the index of the lowest bit set in `bits`, or -1 if none is set.
++int lowestBit(uint32_t bits)
++{
++	for(int i = 0; i < 32; i++)
++	{
++		if(bits & (1u << i))
++		{
++			return i;
++		}
++	}
++	return -1;
++}
++
++// A vertex shader that writes its vec2 attribute at location 0 to element
++// gl_VertexIndex of the storage buffer at set 0, binding 0.
++const char *const kVertexShader = R"(
++               OpCapability Shader
++               OpMemoryModel Logical GLSL450
++               OpEntryPoint Vertex %main "main" %attribute %vertexIndex %perVertex
++               OpDecorate %attribute Location 0
++               OpDecorate %vertexIndex BuiltIn VertexIndex
++               OpMemberDecorate %PerVertex 0 BuiltIn Position
++               OpMemberDecorate %PerVertex 1 BuiltIn PointSize
++               OpDecorate %PerVertex Block
++               OpDecorate %Values ArrayStride 8
++               OpMemberDecorate %Result 0 Offset 0
++               OpDecorate %Result BufferBlock
++               OpDecorate %result DescriptorSet 0
++               OpDecorate %result Binding 0
++       %void = OpTypeVoid
++   %voidFunc = OpTypeFunction %void
++      %float = OpTypeFloat 32
++    %v2float = OpTypeVector %float 2
++    %v4float = OpTypeVector %float 4
++        %int = OpTypeInt 32 1
++      %int_0 = OpConstant %int 0
++      %int_1 = OpConstant %int 1
++    %float_0 = OpConstant %float 0
++    %float_1 = OpConstant %float 1
++   %position = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_1
++ %inputVec2Ptr = OpTypePointer Input %v2float
++  %attribute = OpVariable %inputVec2Ptr Input
++%inputIntPtr = OpTypePointer Input %int
++%vertexIndex = OpVariable %inputIntPtr Input
++  %PerVertex = OpTypeStruct %v4float %float
++%outputPerVertexPtr = OpTypePointer Output %PerVertex
++  %perVertex = OpVariable %outputPerVertexPtr Output
++%outputVec4Ptr = OpTypePointer Output %v4float
++%outputFloatPtr = OpTypePointer Output %float
++     %Values = OpTypeRuntimeArray %v2float
++     %Result = OpTypeStruct %Values
++%uniformResultPtr = OpTypePointer Uniform %Result
++     %result = OpVariable %uniformResultPtr Uniform
++%uniformVec2Ptr = OpTypePointer Uniform %v2float
++       %main = OpFunction %void None %voidFunc
++      %entry = OpLabel
++      %value = OpLoad %v2float %attribute
++      %index = OpLoad %int %vertexIndex
++        %out = OpAccessChain %uniformVec2Ptr %result %int_0 %index
++               OpStore %out %value
++%positionOut = OpAccessChain %outputVec4Ptr %perVertex %int_0
++               OpStore %positionOut %position
++%pointSizeOut = OpAccessChain %outputFloatPtr %perVertex %int_1
++               OpStore %pointSizeOut %float_1
++               OpReturn
++               OpFunctionEnd
++)";
++
++}  // anonymous namespace
++
++class VertexInputTest : public testing::Test
++{
++protected:
++	static Driver driver;
++
++	static void SetUpTestSuite()
++	{
++		ASSERT_TRUE(driver.loadSwiftShader());
++	}
++
++	static void TearDownTestSuite()
++	{
++		driver.unload();
++	}
++};
++
++Driver VertexInputTest::driver;
++
++// Draws four vertices whose VK_FORMAT_R32G32_SFLOAT attributes end exactly at
++// the end of their VkDeviceMemory, which is followed by an inaccessible page,
++// and checks that the vertex shader receives each attribute. Vertex input used
++// to load 16 bytes for this 8-byte format, so the last vertex read past the end
++// of the memory and faulted. Importing host memory with
++// VK_EXT_external_memory_host is the only way to control what follows a
++// VkDeviceMemory, so the test is skipped where that extension is unavailable.
++TEST_F(VertexInputTest, AttributeAtEndOfMemory)
++{
++	const VkInstanceCreateInfo instanceCreateInfo = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
++	VkInstance instance = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateInstance(&instanceCreateInfo, nullptr, &instance));
++	ASSERT_TRUE(driver.resolve(instance));
++
++	uint32_t physicalDeviceCount = 1;
++	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
++	driver.vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, &physicalDevice);
++	ASSERT_EQ(physicalDeviceCount, 1u);
++
++	uint32_t extensionCount = 0;
++	VK_ASSERT(driver.vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, nullptr));
++	std::vector<VkExtensionProperties> extensions(extensionCount);
++	VK_ASSERT(driver.vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extensionCount, extensions.data()));
++	if(std::none_of(extensions.begin(), extensions.end(), [](const VkExtensionProperties &extension) {
++		   return strcmp(extension.extensionName, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) == 0;
++	   }))
++	{
++		driver.vkDestroyInstance(instance, nullptr);
++		GTEST_SKIP() << VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME << " is not supported";
++	}
++
++	VkPhysicalDeviceExternalMemoryHostPropertiesEXT hostProperties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT };
++	VkPhysicalDeviceProperties2 properties = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &hostProperties };
++	driver.vkGetPhysicalDeviceProperties2(physicalDevice, &properties);
++
++	// Queue family 0 supports graphics on SwiftShader.
++	const float queuePriority = 1.0f;
++	VkDeviceQueueCreateInfo queueCreateInfo = { VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO };
++	queueCreateInfo.queueFamilyIndex = 0;
++	queueCreateInfo.queueCount = 1;
++	queueCreateInfo.pQueuePriorities = &queuePriority;
++	VkPhysicalDeviceFeatures features = {};
++	features.vertexPipelineStoresAndAtomics = VK_TRUE;
++	const char *const extensionNames[] = { VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME };
++	VkDeviceCreateInfo deviceCreateInfo = { VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
++	deviceCreateInfo.queueCreateInfoCount = 1;
++	deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
++	deviceCreateInfo.enabledExtensionCount = 1;
++	deviceCreateInfo.ppEnabledExtensionNames = extensionNames;
++	deviceCreateInfo.pEnabledFeatures = &features;
++	VkDevice device = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateDevice(physicalDevice, &deviceCreateInfo, nullptr, &device));
++	VkQueue queue = VK_NULL_HANDLE;
++	driver.vkGetDeviceQueue(device, 0, 0, &queue);
++
++	auto vkGetMemoryHostPointerPropertiesEXT = reinterpret_cast<PFN_vkGetMemoryHostPointerPropertiesEXT>(
++	    driver.vk_icdGetInstanceProcAddr(instance, "vkGetMemoryHostPointerPropertiesEXT"));
++	ASSERT_NE(vkGetMemoryHostPointerPropertiesEXT, nullptr);
++
++	// The vertex buffer: one imported block of host memory, followed by an
++	// inaccessible page.
++	const size_t memorySize = std::max<size_t>(GuardedMemory::pageSize(), hostProperties.minImportedHostPointerAlignment);
++	GuardedMemory hostMemory(memorySize);
++	ASSERT_NE(hostMemory.data(), nullptr);
++
++	constexpr uint32_t kVertexCount = 4;
++	constexpr VkDeviceSize kVertexSize = 2 * sizeof(float);
++	const VkDeviceSize verticesOffset = memorySize - kVertexCount * kVertexSize;
++	float *vertices = reinterpret_cast<float *>(static_cast<uint8_t *>(hostMemory.data()) + verticesOffset);
++	for(uint32_t i = 0; i < 2 * kVertexCount; i++)
++	{
++		vertices[i] = static_cast<float>(i + 1);
++	}
++
++	VkMemoryHostPointerPropertiesEXT hostPointerProperties = { VK_STRUCTURE_TYPE_MEMORY_HOST_POINTER_PROPERTIES_EXT };
++	VK_ASSERT(vkGetMemoryHostPointerPropertiesEXT(device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT,
++	                                              hostMemory.data(), &hostPointerProperties));
++
++	VkExternalMemoryBufferCreateInfo externalBufferCreateInfo = { VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO };
++	externalBufferCreateInfo.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
++	VkBufferCreateInfo vertexBufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, &externalBufferCreateInfo };
++	vertexBufferCreateInfo.size = memorySize;
++	vertexBufferCreateInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
++	vertexBufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++	VkBuffer vertexBuffer = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateBuffer(device, &vertexBufferCreateInfo, nullptr, &vertexBuffer));
++	VkMemoryRequirements vertexRequirements = {};
++	driver.vkGetBufferMemoryRequirements(device, vertexBuffer, &vertexRequirements);
++
++	VkImportMemoryHostPointerInfoEXT importInfo = { VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT };
++	importInfo.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT;
++	importInfo.pHostPointer = hostMemory.data();
++	VkMemoryAllocateInfo vertexAllocateInfo = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &importInfo };
++	vertexAllocateInfo.allocationSize = memorySize;
++	const int vertexMemoryType = lowestBit(hostPointerProperties.memoryTypeBits & vertexRequirements.memoryTypeBits);
++	ASSERT_GE(vertexMemoryType, 0);
++	vertexAllocateInfo.memoryTypeIndex = static_cast<uint32_t>(vertexMemoryType);
++	VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkAllocateMemory(device, &vertexAllocateInfo, nullptr, &vertexMemory));
++	VK_ASSERT(driver.vkBindBufferMemory(device, vertexBuffer, vertexMemory, 0));
++
++	// The storage buffer that the vertex shader writes the attributes to.
++	VkBufferCreateInfo resultBufferCreateInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
++	resultBufferCreateInfo.size = kVertexCount * kVertexSize;
++	resultBufferCreateInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
++	resultBufferCreateInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
++	VkBuffer resultBuffer = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateBuffer(device, &resultBufferCreateInfo, nullptr, &resultBuffer));
++	VkMemoryRequirements resultRequirements = {};
++	driver.vkGetBufferMemoryRequirements(device, resultBuffer, &resultRequirements);
++	VkPhysicalDeviceMemoryProperties memoryProperties = {};
++	driver.vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memoryProperties);
++	int resultMemoryType = -1;
++	for(uint32_t i = 0; i < memoryProperties.memoryTypeCount && resultMemoryType < 0; i++)
++	{
++		const VkMemoryPropertyFlags hostVisible = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
++		if((resultRequirements.memoryTypeBits & (1u << i)) &&
++		   (memoryProperties.memoryTypes[i].propertyFlags & hostVisible) == hostVisible)
++		{
++			resultMemoryType = static_cast<int>(i);
++		}
++	}
++	ASSERT_GE(resultMemoryType, 0);
++	VkMemoryAllocateInfo resultAllocateInfo = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
++	resultAllocateInfo.allocationSize = resultRequirements.size;
++	resultAllocateInfo.memoryTypeIndex = static_cast<uint32_t>(resultMemoryType);
++	VkDeviceMemory resultMemory = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkAllocateMemory(device, &resultAllocateInfo, nullptr, &resultMemory));
++	VK_ASSERT(driver.vkBindBufferMemory(device, resultBuffer, resultMemory, 0));
++
++	VkDescriptorSetLayoutBinding binding = {};
++	binding.binding = 0;
++	binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++	binding.descriptorCount = 1;
++	binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
++	VkDescriptorSetLayoutCreateInfo setLayoutCreateInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
++	setLayoutCreateInfo.bindingCount = 1;
++	setLayoutCreateInfo.pBindings = &binding;
++	VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateDescriptorSetLayout(device, &setLayoutCreateInfo, nullptr, &setLayout));
++
++	VkDescriptorPoolSize poolSize = { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 };
++	VkDescriptorPoolCreateInfo poolCreateInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
++	poolCreateInfo.maxSets = 1;
++	poolCreateInfo.poolSizeCount = 1;
++	poolCreateInfo.pPoolSizes = &poolSize;
++	VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateDescriptorPool(device, &poolCreateInfo, nullptr, &descriptorPool));
++	VkDescriptorSetAllocateInfo setAllocateInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
++	setAllocateInfo.descriptorPool = descriptorPool;
++	setAllocateInfo.descriptorSetCount = 1;
++	setAllocateInfo.pSetLayouts = &setLayout;
++	VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkAllocateDescriptorSets(device, &setAllocateInfo, &descriptorSet));
++	VkDescriptorBufferInfo resultBufferInfo = { resultBuffer, 0, VK_WHOLE_SIZE };
++	VkWriteDescriptorSet write = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
++	write.dstSet = descriptorSet;
++	write.descriptorCount = 1;
++	write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
++	write.pBufferInfo = &resultBufferInfo;
++	driver.vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
++
++	VkPipelineLayoutCreateInfo pipelineLayoutCreateInfo = { VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
++	pipelineLayoutCreateInfo.setLayoutCount = 1;
++	pipelineLayoutCreateInfo.pSetLayouts = &setLayout;
++	VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreatePipelineLayout(device, &pipelineLayoutCreateInfo, nullptr, &pipelineLayout));
++
++	spvtools::SpirvTools spirvTools(SPV_ENV_VULKAN_1_0);
++	std::vector<uint32_t> spirv;
++	ASSERT_TRUE(spirvTools.Assemble(kVertexShader, &spirv));
++	ASSERT_TRUE(spirvTools.Validate(spirv));
++	VkShaderModuleCreateInfo shaderModuleCreateInfo = { VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
++	shaderModuleCreateInfo.codeSize = spirv.size() * sizeof(uint32_t);
++	shaderModuleCreateInfo.pCode = spirv.data();
++	VkShaderModule shaderModule = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateShaderModule(device, &shaderModuleCreateInfo, nullptr, &shaderModule));
++
++	// Rasterization is discarded, so the render pass needs no attachments.
++	VkSubpassDescription subpass = {};
++	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
++	VkRenderPassCreateInfo renderPassCreateInfo = { VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
++	renderPassCreateInfo.subpassCount = 1;
++	renderPassCreateInfo.pSubpasses = &subpass;
++	VkRenderPass renderPass = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateRenderPass(device, &renderPassCreateInfo, nullptr, &renderPass));
++	VkFramebufferCreateInfo framebufferCreateInfo = { VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
++	framebufferCreateInfo.renderPass = renderPass;
++	framebufferCreateInfo.width = 1;
++	framebufferCreateInfo.height = 1;
++	framebufferCreateInfo.layers = 1;
++	VkFramebuffer framebuffer = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateFramebuffer(device, &framebufferCreateInfo, nullptr, &framebuffer));
++
++	VkPipelineShaderStageCreateInfo stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
++	stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
++	stage.module = shaderModule;
++	stage.pName = "main";
++	VkVertexInputBindingDescription vertexBinding = { 0, static_cast<uint32_t>(kVertexSize), VK_VERTEX_INPUT_RATE_VERTEX };
++	VkVertexInputAttributeDescription vertexAttribute = { 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 };
++	VkPipelineVertexInputStateCreateInfo vertexInputState = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
++	vertexInputState.vertexBindingDescriptionCount = 1;
++	vertexInputState.pVertexBindingDescriptions = &vertexBinding;
++	vertexInputState.vertexAttributeDescriptionCount = 1;
++	vertexInputState.pVertexAttributeDescriptions = &vertexAttribute;
++	VkPipelineInputAssemblyStateCreateInfo inputAssemblyState = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
++	inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
++	VkViewport viewport = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 1.0f };
++	VkRect2D scissor = { { 0, 0 }, { 1, 1 } };
++	VkPipelineViewportStateCreateInfo viewportState = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
++	viewportState.viewportCount = 1;
++	viewportState.pViewports = &viewport;
++	viewportState.scissorCount = 1;
++	viewportState.pScissors = &scissor;
++	VkPipelineRasterizationStateCreateInfo rasterizationState = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
++	rasterizationState.rasterizerDiscardEnable = VK_TRUE;
++	rasterizationState.lineWidth = 1.0f;
++	VkPipelineMultisampleStateCreateInfo multisampleState = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
++	multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
++	VkGraphicsPipelineCreateInfo pipelineCreateInfo = { VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
++	pipelineCreateInfo.stageCount = 1;
++	pipelineCreateInfo.pStages = &stage;
++	pipelineCreateInfo.pVertexInputState = &vertexInputState;
++	pipelineCreateInfo.pInputAssemblyState = &inputAssemblyState;
++	pipelineCreateInfo.pViewportState = &viewportState;
++	pipelineCreateInfo.pRasterizationState = &rasterizationState;
++	pipelineCreateInfo.pMultisampleState = &multisampleState;
++	pipelineCreateInfo.layout = pipelineLayout;
++	pipelineCreateInfo.renderPass = renderPass;
++	VkPipeline pipeline = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCreateInfo, nullptr, &pipeline));
++
++	VkCommandPoolCreateInfo commandPoolCreateInfo = { VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
++	commandPoolCreateInfo.queueFamilyIndex = 0;
++	VkCommandPool commandPool = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkCreateCommandPool(device, &commandPoolCreateInfo, nullptr, &commandPool));
++	VkCommandBufferAllocateInfo commandBufferAllocateInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
++	commandBufferAllocateInfo.commandPool = commandPool;
++	commandBufferAllocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
++	commandBufferAllocateInfo.commandBufferCount = 1;
++	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
++	VK_ASSERT(driver.vkAllocateCommandBuffers(device, &commandBufferAllocateInfo, &commandBuffer));
++
++	VkCommandBufferBeginInfo beginInfo = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
++	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
++	VK_ASSERT(driver.vkBeginCommandBuffer(commandBuffer, &beginInfo));
++	VkRenderPassBeginInfo renderPassBeginInfo = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
++	renderPassBeginInfo.renderPass = renderPass;
++	renderPassBeginInfo.framebuffer = framebuffer;
++	renderPassBeginInfo.renderArea = scissor;
++	driver.vkCmdBeginRenderPass(commandBuffer, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
++	driver.vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
++	driver.vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
++	driver.vkCmdBindVertexBuffers(commandBuffer, 0, 1, &vertexBuffer, &verticesOffset);
++	driver.vkCmdDraw(commandBuffer, kVertexCount, 1, 0, 0);
++	driver.vkCmdEndRenderPass(commandBuffer);
++	VK_ASSERT(driver.vkEndCommandBuffer(commandBuffer));
++
++	VkSubmitInfo submitInfo = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
++	submitInfo.commandBufferCount = 1;
++	submitInfo.pCommandBuffers = &commandBuffer;
++	VK_ASSERT(driver.vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE));
++	VK_ASSERT(driver.vkQueueWaitIdle(queue));
++
++	void *mapped = nullptr;
++	VK_ASSERT(driver.vkMapMemory(device, resultMemory, 0, VK_WHOLE_SIZE, 0, &mapped));
++	const float *result = static_cast<const float *>(mapped);
++	for(uint32_t i = 0; i < 2 * kVertexCount; i++)
++	{
++		EXPECT_EQ(result[i], static_cast<float>(i + 1)) << "component " << i;
++	}
++	driver.vkUnmapMemory(device, resultMemory);
++
++	driver.vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
++	driver.vkDestroyCommandPool(device, commandPool, nullptr);
++	driver.vkDestroyPipeline(device, pipeline, nullptr);
++	driver.vkDestroyFramebuffer(device, framebuffer, nullptr);
++	driver.vkDestroyRenderPass(device, renderPass, nullptr);
++	driver.vkDestroyShaderModule(device, shaderModule, nullptr);
++	driver.vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
++	driver.vkDestroyDescriptorPool(device, descriptorPool, nullptr);
++	driver.vkDestroyDescriptorSetLayout(device, setLayout, nullptr);
++	driver.vkDestroyBuffer(device, resultBuffer, nullptr);
++	driver.vkFreeMemory(device, resultMemory, nullptr);
++	driver.vkDestroyBuffer(device, vertexBuffer, nullptr);
++	driver.vkFreeMemory(device, vertexMemory, nullptr);
++	driver.vkDestroyDevice(device, nullptr);
++	driver.vkDestroyInstance(instance, nullptr);
++}
+diff --git a/third_party/SwiftShader/tests/VulkanUnitTests/VkInstanceFuncs.hpp b/third_party/SwiftShader/tests/VulkanUnitTests/VkInstanceFuncs.hpp
+index f750244..8d5a472 100644
+--- a/third_party/SwiftShader/tests/VulkanUnitTests/VkInstanceFuncs.hpp
++++ b/third_party/SwiftShader/tests/VulkanUnitTests/VkInstanceFuncs.hpp
+@@ -23,10 +23,14 @@ VK_INSTANCE(vkAllocateMemory, VkResult, VkDevice, const VkMemoryAllocateInfo *,
+             VkDeviceMemory *);
+ VK_INSTANCE(vkBeginCommandBuffer, VkResult, VkCommandBuffer, const VkCommandBufferBeginInfo *);
+ VK_INSTANCE(vkBindBufferMemory, VkResult, VkDevice, VkBuffer, VkDeviceMemory, VkDeviceSize);
++VK_INSTANCE(vkCmdBeginRenderPass, void, VkCommandBuffer, const VkRenderPassBeginInfo *, VkSubpassContents);
+ VK_INSTANCE(vkCmdBindDescriptorSets, void, VkCommandBuffer, VkPipelineBindPoint, VkPipelineLayout, uint32_t, uint32_t,
+             const VkDescriptorSet *, uint32_t, const uint32_t *);
+ VK_INSTANCE(vkCmdBindPipeline, void, VkCommandBuffer, VkPipelineBindPoint, VkPipeline);
++VK_INSTANCE(vkCmdBindVertexBuffers, void, VkCommandBuffer, uint32_t, uint32_t, const VkBuffer *, const VkDeviceSize *);
+ VK_INSTANCE(vkCmdDispatch, void, VkCommandBuffer, uint32_t, uint32_t, uint32_t);
++VK_INSTANCE(vkCmdDraw, void, VkCommandBuffer, uint32_t, uint32_t, uint32_t, uint32_t);
++VK_INSTANCE(vkCmdEndRenderPass, void, VkCommandBuffer);
+ VK_INSTANCE(vkCreateBuffer, VkResult, VkDevice, const VkBufferCreateInfo *, const VkAllocationCallbacks *, VkBuffer *);
+ VK_INSTANCE(vkCreateCommandPool, VkResult, VkDevice, const VkCommandPoolCreateInfo *, const VkAllocationCallbacks *,
+             VkCommandPool *);
+@@ -36,10 +40,16 @@ VK_INSTANCE(vkCreateDescriptorPool, VkResult, VkDevice, const VkDescriptorPoolCr
+             VkDescriptorPool *);
+ VK_INSTANCE(vkCreateDescriptorSetLayout, VkResult, VkDevice, const VkDescriptorSetLayoutCreateInfo *,
+             const VkAllocationCallbacks *, VkDescriptorSetLayout *);
++VK_INSTANCE(vkCreateFramebuffer, VkResult, VkDevice, const VkFramebufferCreateInfo *, const VkAllocationCallbacks *,
++            VkFramebuffer *);
++VK_INSTANCE(vkCreateGraphicsPipelines, VkResult, VkDevice, VkPipelineCache, uint32_t,
++            const VkGraphicsPipelineCreateInfo *, const VkAllocationCallbacks *, VkPipeline *);
+ VK_INSTANCE(vkCreateDevice, VkResult, VkPhysicalDevice, const VkDeviceCreateInfo *, const VkAllocationCallbacks *,
+             VkDevice *);
+ VK_INSTANCE(vkCreatePipelineLayout, VkResult, VkDevice, const VkPipelineLayoutCreateInfo *, const VkAllocationCallbacks *,
+             VkPipelineLayout *);
++VK_INSTANCE(vkCreateRenderPass, VkResult, VkDevice, const VkRenderPassCreateInfo *, const VkAllocationCallbacks *,
++            VkRenderPass *);
+ VK_INSTANCE(vkCreateShaderModule, VkResult, VkDevice, const VkShaderModuleCreateInfo *, const VkAllocationCallbacks *,
+             VkShaderModule *);
+ VK_INSTANCE(vkDestroyBuffer, void, VkDevice, VkBuffer, const VkAllocationCallbacks *);
+@@ -47,14 +57,19 @@ VK_INSTANCE(vkDestroyCommandPool, void, VkDevice, VkCommandPool, const VkAllocat
+ VK_INSTANCE(vkDestroyDescriptorPool, void, VkDevice, VkDescriptorPool, const VkAllocationCallbacks *);
+ VK_INSTANCE(vkDestroyDescriptorSetLayout, void, VkDevice, VkDescriptorSetLayout, const VkAllocationCallbacks *);
+ VK_INSTANCE(vkDestroyDevice, VkResult, VkDevice, const VkAllocationCallbacks *);
++VK_INSTANCE(vkDestroyFramebuffer, void, VkDevice, VkFramebuffer, const VkAllocationCallbacks *);
+ VK_INSTANCE(vkDestroyInstance, void, VkInstance, const VkAllocationCallbacks *);
+ VK_INSTANCE(vkDestroyPipeline, void, VkDevice, VkPipeline, const VkAllocationCallbacks *);
+ VK_INSTANCE(vkDestroyPipelineLayout, void, VkDevice, VkPipelineLayout, const VkAllocationCallbacks *);
++VK_INSTANCE(vkDestroyRenderPass, void, VkDevice, VkRenderPass, const VkAllocationCallbacks *);
+ VK_INSTANCE(vkDestroyShaderModule, void, VkDevice, VkShaderModule, const VkAllocationCallbacks *);
+ VK_INSTANCE(vkEndCommandBuffer, VkResult, VkCommandBuffer);
++VK_INSTANCE(vkEnumerateDeviceExtensionProperties, VkResult, VkPhysicalDevice, const char *, uint32_t *,
++            VkExtensionProperties *);
+ VK_INSTANCE(vkEnumeratePhysicalDevices, VkResult, VkInstance, uint32_t *, VkPhysicalDevice *);
+ VK_INSTANCE(vkFreeCommandBuffers, void, VkDevice, VkCommandPool, uint32_t, const VkCommandBuffer *);
+ VK_INSTANCE(vkFreeMemory, void, VkDevice, VkDeviceMemory, const VkAllocationCallbacks *);
++VK_INSTANCE(vkGetBufferMemoryRequirements, void, VkDevice, VkBuffer, VkMemoryRequirements *);
+ VK_INSTANCE(vkGetDeviceQueue, void, VkDevice, uint32_t, uint32_t, VkQueue *);
+ VK_INSTANCE(vkGetPhysicalDeviceMemoryProperties, void, VkPhysicalDevice, VkPhysicalDeviceMemoryProperties *);
+ VK_INSTANCE(vkGetPhysicalDeviceProperties, void, VkPhysicalDevice, VkPhysicalDeviceProperties *);

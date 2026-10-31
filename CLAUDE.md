@@ -36,6 +36,11 @@ written to that project's standards, not this repository's or oxgl's:
   write `TODO` in capitals with an owner or bug.
 - Code and comments read as part of the upstream project: no references to oxgl, this
   repository or the bundles. Why the patch exists here goes in the README table.
+- A patch that changes behaviour carries its own tests, in the owning project's test suites
+  and conventions (for SwiftShader, `tests/ReactorUnitTests`, `tests/VulkanUnitTests` and the
+  like), as upstream review requires. A test should fail before the fix and pass after it;
+  where that can't be made deterministic, the patch tests what it can and the README row says
+  what is left untested and why.
 - Check each patch's changed lines with the owning project's formatter before committing it
   (for example `clang-format --lines=<start>:<end>` with SwiftShader's `.clang-format`), and
   keep the patch to the minimum the change needs.

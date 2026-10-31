@@ -221,6 +221,71 @@ index 6db6ca1..1ac0dea 100644
  #if USE_LEGACY_OBJECT_LINKING_LAYER
  	llvm::orc::RTDyldObjectLinkingLayer objectLayer;
  #else
+diff --git a/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp b/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp
+index 0efe654..d64c46c 100644
+--- a/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp
++++ b/third_party/SwiftShader/tests/ReactorUnitTests/ReactorUnitTests.cpp
+@@ -26,6 +26,16 @@
+ #include <thread>
+ #include <tuple>
+ 
++#if defined(_WIN32)
++#	ifndef WIN32_LEAN_AND_MEAN
++#		define WIN32_LEAN_AND_MEAN
++#	endif
++#	ifndef NOMINMAX
++#		define NOMINMAX
++#	endif
++#	include <windows.h>
++#endif
++
+ using namespace rr;
+ 
+ using float4 = float[4];
+@@ -3625,6 +3635,43 @@ TEST(ReactorUnitTests, LoadFromConstantData)
+ 	EXPECT_EQ(result, value);
+ }
+ 
++// A routine's code reaches its constant data with PC-relative relocations of
++// limited reach, such as AArch64's ADRP (+/-4 GiB). The JIT used to map each
++// section separately, so on Windows the data could land beyond that reach and
++// the routine read its constants from the wrong address. This test checks that
++// the constant data lies in the same block of pages as the code.
++TEST(ReactorUnitTests, ConstantDataIsNearCode)
++{
++	const int value = 123;
++
++	FunctionT<const void *()> function;
++	{
++		Return(ConstantData(&value, sizeof(value)));
++	}
++
++	auto routine = function(testName().c_str());
++	const void *data = routine();
++	const void *code = reinterpret_cast<const void *>(routine.getEntry());
++	EXPECT_EQ(*static_cast<const int *>(data), value);
++
++	// The test routine is tiny, so its sections span a few pages at most.
++	const uintptr_t distance = (data > code)
++	                               ? reinterpret_cast<uintptr_t>(data) - reinterpret_cast<uintptr_t>(code)
++	                               : reinterpret_cast<uintptr_t>(code) - reinterpret_cast<uintptr_t>(data);
++	EXPECT_LT(distance, uintptr_t(1) << 20);
++
++#if defined(_WIN32)
++	// Separately mapped sections often land next to each other anyway, so the
++	// distance check cannot tell them from one mapping. Windows records the base
++	// of each mapping, which can.
++	MEMORY_BASIC_INFORMATION codeInfo = {};
++	MEMORY_BASIC_INFORMATION dataInfo = {};
++	ASSERT_NE(VirtualQuery(code, &codeInfo, sizeof(codeInfo)), 0u);
++	ASSERT_NE(VirtualQuery(data, &dataInfo, sizeof(dataInfo)), 0u);
++	EXPECT_EQ(codeInfo.AllocationBase, dataInfo.AllocationBase);
++#endif
++}
++
+ TEST(ReactorUnitTests, Multithreaded_Function)
+ {
+ 	constexpr int numThreads = 8;
 diff --git a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp b/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp
 index 440ab41..7a57225 100644
 --- a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/RuntimeDyldELF.cpp
