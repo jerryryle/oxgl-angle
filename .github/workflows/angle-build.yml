@@ -317,6 +317,7 @@ jobs:
         run: |
           tag="$(angle/scripts/pin.sh bundle_version)"
           commit="$(angle/scripts/pin.sh angle_commit)"
+          branch="$(angle/scripts/pin.sh chromium_branch)"
           (cd bundles && sha256sum ./*.tar.xz | tee SHA256SUMS)
           # Published bundles are immutable (rebuilds are not bit-identical), so
           # never upload into an existing release.
@@ -326,7 +327,7 @@ jobs:
           fi
           # Tag the commit whose recipe built these bundles, not the default branch.
           gh release create "$tag" bundles/*.tar.xz bundles/SHA256SUMS \
-            --target "$GITHUB_SHA" --title "ANGLE bundle $tag" \
+            --target "$GITHUB_SHA" --title "oxgl-ANGLE ${tag#angle-} ($branch)" \
             --notes "ANGLE $commit built by angle/build.sh at ${GITHUB_SHA}. Digests are in SHA256SUMS; copy them into oxgl's angle/bundles.toml."
           {
             echo "### ANGLE bundle digests ($tag)"
