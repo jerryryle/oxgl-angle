@@ -23,6 +23,7 @@ arm64 runners.
 | `build.sh`, `build.ps1` | Build recipe (`fetch`, `build`, `bundle`, `all`) for macOS/Linux and Windows (x64 and arm64) |
 | `scripts/bundle.py` | Assembles the bundle and enforces the outcome checks |
 | `scripts/check_pin.py` | Validates `pin.toml` |
+| `scripts/bump.py` | Pins `pin.toml` to the ANGLE commit Chrome stable ships (run daily by `angle-bump`) |
 | `licenses.toml` | SPDX licenses for third_party directories lacking `README.chromium` metadata |
 | `smoke/smoke.c` | Loads a bundle, renders one frame with SwiftShader, reads a pixel back |
 | `../deny.toml` | The license allowlist, a copy of oxgl's (which is authoritative) |
@@ -104,7 +105,34 @@ The `angle-build` workflow runs on every pull request and reports one
 smoke-tests all five platforms when the recipe or the workflow itself changed,
 and skips the builds otherwise. A change to the workflow alone (such as a
 Dependabot action bump) builds and smoke-tests but needs no new
-`bundle_version`, since nothing is released from a pull request.
+`bundle_version`, since nothing is released from a pull request. When a recipe
+change merges, `angle-build` builds and smoke-tests it again on `main` and
+publishes the release named after `bundle_version`, with the digests in its
+summary. If that run fails, rerun it, or run `angle-build` by hand from `main`
+(Actions → angle-build → Run workflow).
+
+### New Chrome stable releases
+
+The `angle-bump` workflow checks daily for a new Chrome stable release whose
+Chromium DEPS pins a different ANGLE commit (`scripts/bump.py`). It sets
+`angle_commit`, `chromium_branch` and `bundle_version` (`angle-<branch>.1` on
+a new branch, `.<n+1>` on the pinned one) and opens a pull request from the
+`angle-bump` branch, then runs `angle-build` on that branch. When it passes,
+the `merge-bump` job merges the pull request and runs `angle-build` on `main`,
+which publishes the release. A bump that fails (say, a patch no longer
+applies) stays open: push the fix to `angle-bump` and it merges once green. No
+new bump opens while one is open.
+
+Both workflows use only the default `GITHUB_TOKEN`. Its pushes, pull requests
+and merges trigger no workflows, which is why they start `angle-build` with
+`gh workflow run` instead. This relies on three repository settings: "Allow
+GitHub Actions to create and approve pull requests" (Settings → Actions →
+General), and, in the "Default (bypassable)" ruleset, no required approving
+review and no extra approval for unattributed changes (both would hold a pull
+request the workflow opened for a human review). The ruleset keeps the
+required `angle-build` check.
+
+### By hand
 
 1. Optionally iterate locally first: change the recipe, run
    `angle/build.sh all <platform>` (later runs recompile only what changed) and
@@ -116,15 +144,12 @@ Dependabot action bump) builds and smoke-tests but needs no new
    fails within seconds if the version is already released, within minutes if
    a GN arg or license check fails (`bundle.py --preflight`), and otherwise
    builds, checks and smoke-tests all five platforms.
-3. After it merges, run `angle-build` by hand from `main` (Actions →
-   angle-build → Run workflow). That run creates a draft release named after
-   `bundle_version`, with the digests in its summary.
+3. After it merges, the `angle-build` run on `main` publishes the release.
 4. In oxgl, copy each platform's URL and sha256, and the `bundle_version`,
    into `angle/bundles.toml`, run `python3 angle/scripts/check_pin.py`, and open
    a PR. oxgl's CI builds and tests against the new bundles; after an ANGLE
    update, also recheck oxgl's "Known upstream issues" (its `angle/README.md`).
-5. When that PR merges, publish the release:
-   `gh release edit <bundle_version> --draft=false`.
+   Step 4 applies to an automatic bump too.
 
 A deleted or broken release asset is replaced the same way, under a new
 `bundle_version`.

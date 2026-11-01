@@ -1,0 +1,52 @@
+# Daily, pins the ANGLE commit Chrome stable ships (angle/scripts/bump.py),
+# opens a pull request for it from the `angle-bump` branch and runs angle-build
+# on that branch. Pushes and pull requests made with the default token trigger
+# no workflows, but a workflow_dispatch does, and its `angle-build` check lands
+# on the pull request's head commit. When it passes, angle-build's merge-bump
+# job merges the pull request and runs angle-build on main, which publishes the
+# release. A bump that fails (a patch that no longer applies, say) stays open
+# for a fix pushed to its branch; no new bump is opened while one is open.
+name: angle-bump
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: angle-bump
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pin Chrome stable's ANGLE and open a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          open="$(gh pr list --repo "$GITHUB_REPOSITORY" --head angle-bump --state open --json number --jq length)"
+          if [ "$open" != 0 ]; then
+            echo "A bump pull request is already open"
+            exit 0
+          fi
+          tag="$(python3 angle/scripts/bump.py)"
+          [ -n "$tag" ] || exit 0
+          python3 angle/scripts/check_pin.py
+          title="Pin Chrome stable's ANGLE ($tag)"
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "$title" angle/pin.toml
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:refs/heads/angle-bump
+          gh pr create --repo "$GITHUB_REPOSITORY" --base main --head angle-bump --title "$title" \
+            --body "ANGLE $(angle/scripts/pin.sh angle_commit) from $(angle/scripts/pin.sh chromium_branch), the commit Chrome stable's DEPS pins. angle-build merges this when it passes."
+          gh workflow run angle-build.yml --repo "$GITHUB_REPOSITORY" --ref angle-bump

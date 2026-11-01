@@ -6,18 +6,26 @@
 # workflow does the same without needing a new bundle_version; any other pull
 # request skips the builds. The arm64 Linux and Windows bundles are
 # cross-compiled on x64 runners and smoke-tested on arm64 runners in the smoke
-# job. Run manually (workflow_dispatch) from main to also create a draft
-# release, then copy the printed digests into oxgl's angle/bundles.toml (see
-# angle/README.md). Published bundle versions are never rebuilt or replaced.
+# job. A push to main that changes the recipe (a merged pull request) builds
+# and smoke-tests again and publishes the release; a manual run
+# (workflow_dispatch) from main does the same for an unreleased bundle_version,
+# such as after a failed release run. Copy the printed digests into oxgl's
+# angle/bundles.toml (see angle/README.md). A green run on angle-bump.yml's
+# `angle-bump` branch merges its pull request and runs this on main (the
+# merge-bump job). Published bundle versions are never rebuilt or replaced.
 name: angle-build
 
 on:
   workflow_dispatch:
   pull_request:
+  push:
+    branches: [main]
 
+# A newer push to a pull request cancels its older run; runs on main are never
+# cancelled, so every merged recipe change gets its release.
 concurrency:
-  group: angle-build-${{ github.ref }}
-  cancel-in-progress: true
+  group: angle-build-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -31,8 +39,10 @@ jobs:
   # Which kind of change this is. recipe: a file that builds or tests a bundle
   # changed (it needs a new bundle_version). build: the recipe or this workflow
   # changed (the bundles are built and smoke-tested). Same script as oxgl's
-  # ci.yml `changes` job; when the changed files can't be determined (no pull
-  # request, or the diff fails), both are true.
+  # ci.yml `changes` job, also run on the commits a push to main adds, where
+  # only a recipe change builds (its pull request already built a workflow
+  # change, and there is nothing to release); when the changed files can't be
+  # determined (a manual run, or the diff fails), both are true.
   changes:
     runs-on: ubuntu-24.04
     outputs:
@@ -46,13 +56,13 @@ jobs:
       - id: match
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.after }}
         run: |
           recipe=true build=true
           # --no-renames lists both sides of a rename, so moving a recipe file
           # away still counts as changing it.
-          if [ "$EVENT" = pull_request ] && files="$(git diff --no-renames --name-only "$BASE...$HEAD")" && [ -n "$files" ]; then
+          if [ "$EVENT" != workflow_dispatch ] && files="$(git diff --no-renames --name-only "$BASE...$HEAD")" && [ -n "$files" ]; then
             recipe=false build=false
             while IFS= read -r f; do
               case "$f" in
@@ -62,6 +72,7 @@ jobs:
                   build=true ;;
               esac
             done <<< "$files"
+            [ "$EVENT" = push ] && build="$recipe"
           fi
           { echo "recipe=$recipe"; echo "build=$build"; } | tee -a "$GITHUB_OUTPUT"
 
@@ -90,8 +101,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.recipe == 'true'
     # A recipe change needs a new bundle_version; fail in seconds, not after
-    # the compile. (Drafts are invisible to this read-only token; the release
-    # job catches those.)
+    # the compile.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -285,9 +295,10 @@ jobs:
           if ($LASTEXITCODE) { throw 'smoke test failed' }
 
   release:
-    needs: [build, smoke]
-    # Releases are only created by a deliberate manual run, never by a PR.
-    if: github.event_name == 'workflow_dispatch'
+    needs: [changes, build, smoke]
+    # Releases come only from main: a push that changed the recipe, or a
+    # manual run. Never from a pull request.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.recipe == 'true')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -299,7 +310,7 @@ jobs:
         with:
           path: bundles
           merge-multiple: true
-      - name: Create draft release and print digests
+      - name: Publish release and print digests
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -307,14 +318,14 @@ jobs:
           commit="$(angle/scripts/pin.sh angle_commit)"
           (cd bundles && sha256sum ./*.tar.xz | tee SHA256SUMS)
           # Published bundles are immutable (rebuilds are not bit-identical), so
-          # never upload into an existing release, draft or not.
+          # never upload into an existing release.
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "::error::release $tag already exists; bump bundle_version in angle/pin.toml (delete it first if it is an unpublished draft)"
+            echo "::error::release $tag already exists; bump bundle_version in angle/pin.toml"
             exit 1
           fi
           # Tag the commit whose recipe built these bundles, not the default branch.
           gh release create "$tag" bundles/*.tar.xz bundles/SHA256SUMS \
-            --draft --target "$GITHUB_SHA" --title "ANGLE bundle $tag" \
+            --target "$GITHUB_SHA" --title "ANGLE bundle $tag" \
             --notes "ANGLE $commit built by angle/build.sh at ${GITHUB_SHA}. Digests are in SHA256SUMS; copy them into oxgl's angle/bundles.toml."
           {
             echo "### ANGLE bundle digests ($tag)"
@@ -335,12 +346,38 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
-          echo "$RESULTS" | jq -e --arg event "$EVENT" '
+          echo "$RESULTS" | jq -e --arg event "$EVENT" --arg ref "$REF" '
             def ok(skippable): .result == "success" or (.result == "skipped" and skippable);
             .changes.outputs as $c
             | (.changes | ok(false)) and (.["workflow-lint"] | ok(false))
               and (.guard | ok($c.recipe == "false"))
               and (.build | ok($c.build == "false"))
               and (.smoke | ok($c.build == "false"))
-              and (.release | ok($event == "pull_request"))'
+              and (.release | ok($ref != "refs/heads/main" or ($event == "push" and $c.recipe == "false")))'
+
+  # Merges the green pull request from angle-bump.yml: after the run its
+  # dispatch started, or after a pull request run for a fix pushed to the
+  # branch. --match-head-commit merges only the commit this run tested. A merge
+  # with the default token triggers no push run, so this starts the run on main
+  # that publishes the release.
+  merge-bump:
+    needs: angle-build
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/angle-bump')
+      || (github.event_name == 'pull_request' && github.head_ref == 'angle-bump'
+          && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Merge the bump pull request and release from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          gh pr merge angle-bump --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$HEAD"
+          gh workflow run angle-build.yml --repo "$GITHUB_REPOSITORY" --ref main
