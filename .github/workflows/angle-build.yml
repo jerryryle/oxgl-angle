@@ -10,9 +10,10 @@
 # and smoke-tests again and publishes the release; a manual run
 # (workflow_dispatch) from main does the same for an unreleased bundle_version,
 # such as after a failed release run. Copy the printed digests into oxgl's
-# angle/bundles.toml (see angle/README.md). A green run on angle-bump.yml's
-# `angle-bump` branch merges its pull request and runs this on main (the
-# merge-bump job). Published bundle versions are never rebuilt or replaced.
+# angle/bundles.toml (see angle/README.md). A green manual run on
+# angle-bump.yml's `angle-bump` branch merges its pull request and runs this on
+# main (the merge-bump job). Published bundle versions are never rebuilt or
+# replaced.
 name: angle-build
 
 on:
@@ -357,27 +358,55 @@ jobs:
               and (.smoke | ok($c.build == "false"))
               and (.release | ok($ref != "refs/heads/main" or ($event == "push" and $c.recipe == "false")))'
 
-  # Merges the green pull request from angle-bump.yml: after the run its
-  # dispatch started, or after a pull request run for a fix pushed to the
-  # branch. --match-head-commit merges only the commit this run tested. A merge
-  # with the default token triggers no push run, so this starts the run on main
-  # that publishes the release.
+  # Merges the green pull request from angle-bump.yml after the run its
+  # dispatch started, but only when the branch is exactly the change main's
+  # bump.py makes to main's pin.toml for the Chrome version its commit names,
+  # which bump.py requires to be a Linux stable release: anything else pushed to
+  # angle-bump (a fix, or a bump gone stale because main moved) waits for a
+  # person, so nothing reaches a release without review except an ANGLE commit
+  # a Chrome stable release pins. The version comes from the commit, not a new
+  # lookup of the current stable, so a Chrome release during the build doesn't
+  # hold up the merge.
+  # --match-head-commit merges only the commit this run tested. A merge with the
+  # default token triggers no push run, so this starts the run on main that
+  # publishes the release. The explicit status check matters: the implicit
+  # success() also looks at the skipped release job and would skip this job.
   merge-bump:
     needs: angle-build
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/angle-bump')
-      || (github.event_name == 'pull_request' && github.head_ref == 'angle-bump'
-          && github.event.pull_request.head.repo.full_name == github.repository)
+      ${{ !cancelled() && needs.angle-build.result == 'success'
+      && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/angle-bump' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: write
       actions: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Merge the bump pull request and release from main
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          gh pr merge angle-bump --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$HEAD"
+          # The Chrome version angle-bump.yml put in its commit subject.
+          chrome="$(git log -1 --format=%s HEAD | sed -nE "s/^Pin Chrome ([0-9.]+)'s ANGLE .*/\1/p")"
+          if [ -z "$chrome" ]; then
+            echo "::notice::angle-bump's head is not angle-bump.yml's commit; merge it by hand"
+            exit 0
+          fi
+          # Rerun main's scripts, not the branch's, on main's pin.
+          expected="$RUNNER_TEMP/angle"
+          mkdir "$expected"
+          git show origin/main:angle/scripts/bump.py > "$RUNNER_TEMP/bump.py"
+          git show origin/main:angle/scripts/pin_only.sh > "$RUNNER_TEMP/pin_only.sh"
+          git show origin/main:angle/pin.toml > "$expected/pin.toml"
+          python3 "$RUNNER_TEMP/bump.py" "$expected" "$chrome" > /dev/null
+          if ! bash "$RUNNER_TEMP/pin_only.sh" origin/main HEAD \
+            || ! cmp -s "$expected/pin.toml" angle/pin.toml; then
+            echo "::notice::angle-bump is not exactly bump.py's change to main; merge it by hand"
+            exit 0
+          fi
+          gh pr merge angle-bump --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$GITHUB_SHA"
           gh workflow run angle-build.yml --repo "$GITHUB_REPOSITORY" --ref main
