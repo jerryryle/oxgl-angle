@@ -24,6 +24,7 @@ arm64 runners.
 | `scripts/bundle.py` | Assembles the bundle and enforces the outcome checks |
 | `scripts/check_pin.py` | Validates `pin.toml` |
 | `scripts/bump.py` | Pins `pin.toml` to the ANGLE commit Chrome stable ships (run daily by `angle-bump`) |
+| `scripts/pin_only.sh` | Whether an `angle-bump` branch changes only `pin.toml` (no fix pushed on top) |
 | `licenses.toml` | SPDX licenses for third_party directories lacking `README.chromium` metadata |
 | `smoke/smoke.c` | Loads a bundle, renders one frame with SwiftShader, reads a pixel back |
 | `../deny.toml` | The license allowlist, a copy of oxgl's (which is authoritative) |
@@ -114,14 +115,24 @@ summary. If that run fails, rerun it, or run `angle-build` by hand from `main`
 ### New Chrome stable releases
 
 The `angle-bump` workflow checks daily for a new Chrome stable release whose
-Chromium DEPS pins a different ANGLE commit (`scripts/bump.py`). It sets
+Chromium DEPS pins a newer ANGLE commit (`scripts/bump.py`; it never follows
+stable back to an older branch or an older commit on the pinned one). It sets
 `angle_commit`, `chromium_branch` and `bundle_version` (`angle-<branch>.1` on
 a new branch, `.<n+1>` on the pinned one) and opens a pull request from the
 `angle-bump` branch, then runs `angle-build` on that branch. When it passes,
 the `merge-bump` job merges the pull request and runs `angle-build` on `main`,
-which publishes the release. A bump that fails (say, a patch no longer
-applies) stays open: push the fix to `angle-bump` and it merges once green. No
-new bump opens while one is open.
+which publishes the release.
+
+`merge-bump` merges only the exact change `bump.py` makes to `main`'s
+`pin.toml` for the Chrome stable release named in the bump's commit, rerunning
+`main`'s copy of the script to check, so nothing else pushed to `angle-bump`
+reaches a release without review. A bump that fails (say, a patch no longer
+applies) stays open: push the fix to `angle-bump`, and merge it yourself once
+green; the merge publishes the release. Unless it carries such a fix, the next
+daily run refreshes a bump that went stale because `main` or Chrome stable
+moved on, and closes one `main` no longer needs. To skip an ANGLE commit, add
+the `skip-bump` label to its pull request and close it; remove the label to
+retry.
 
 Both workflows use only the default `GITHUB_TOKEN`. Its pushes, pull requests
 and merges trigger no workflows, which is why they start `angle-build` with
@@ -130,7 +141,12 @@ GitHub Actions to create and approve pull requests" (Settings → Actions →
 General), and, in the "Default (bypassable)" ruleset, no required approving
 review and no extra approval for unattributed changes (both would hold a pull
 request the workflow opened for a human review). The ruleset keeps the
-required `angle-build` check.
+required `angle-build` check. Without a required review, anyone with write
+access can merge any pull request; this repository accepts that because it has
+a single maintainer, and because oxgl uses a bundle only after its digests are
+copied into oxgl's `angle/bundles.toml` in a reviewed pull request. With more
+maintainers, give the workflows a GitHub App token instead and list the App as
+a ruleset bypass actor, so review can be required of everyone else.
 
 ### By hand
 

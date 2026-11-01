@@ -7,9 +7,10 @@ describes the recipe, local builds and releasing.
 
 ## Recipe rules
 
-- Any recipe change (`angle/pin.toml`, `args/`, `patches/`, `build.sh`, `build.ps1`, `scripts/`,
-  `smoke/`, license data) gets a new `bundle_version`. Published bundles are never rebuilt or
-  replaced: rebuilds are not bit-identical, and older oxgl commits pin the old digests.
+- Any recipe change (`angle/pin.toml`, `args/`, `patches/`, `build.sh`, `build.ps1`,
+  `scripts/bundle.py`, `scripts/pin.sh`, `smoke/`, license data) gets a new `bundle_version`.
+  Published bundles are never rebuilt or replaced: rebuilds are not bit-identical, and older
+  oxgl commits pin the old digests.
 - Keep `deny.toml` in step with oxgl's copy: oxgl re-checks every pinned bundle's licenses
   against its own.
 - Every patch in `angle/patches/` has a row in `angle/README.md`'s "Source patches" table saying
