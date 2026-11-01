@@ -1,0 +1,85 @@
+diff --git a/src/libANGLE/renderer/renderer_utils.cpp b/src/libANGLE/renderer/renderer_utils.cpp
+index 8cf3b85daf..2121f4803c 100644
+--- a/src/libANGLE/renderer/renderer_utils.cpp
++++ b/src/libANGLE/renderer/renderer_utils.cpp
+@@ -940,6 +940,15 @@ angle::Result IncompleteTextureSet::getIncompleteTexture(
+         ASSERT(!t->hasObservers());
+         t->setCompareMode(context, GL_COMPARE_REF_TO_TEXTURE);
+     }
++    else if (format == gl::SamplerFormat::Unsigned || format == gl::SamplerFormat::Signed)
++    {
++        // Integer textures cannot be filtered linearly: GL makes them incomplete and Vulkan leaves
++        // the result undefined. Replace the default linear filters with nearest filtering so that
++        // filtered sampling returns the incomplete texture's value.
++        ASSERT(!t->hasObservers());
++        t->setMinFilter(context, GL_NEAREST);
++        t->setMagFilter(context, GL_NEAREST);
++    }
+ 
+     ANGLE_TRY(t->syncState(context, gl::Command::Other));
+ 
+diff --git a/src/tests/gl_tests/IncompleteTextureTest.cpp b/src/tests/gl_tests/IncompleteTextureTest.cpp
+index cc75b4aca9..8340d47a28 100644
+--- a/src/tests/gl_tests/IncompleteTextureTest.cpp
++++ b/src/tests/gl_tests/IncompleteTextureTest.cpp
+@@ -445,6 +445,60 @@ void main()
+     EXPECT_PIXEL_EQ(width, height, blackColor[0], blackColor[1], blackColor[2], blackColor[3]);
+ }
+ 
++// Verifies that filtered sampling of incomplete integer textures returns the default value. The
++// IntegerType tests use texelFetch, which bypasses filtering.
++TEST_P(IncompleteTextureTestES3, IntegerTypeFilteredSample)
++{
++    // GLES backend on Adreno has a problem to create a incomplete texture, although it doesn't go
++    // through the routine which creates a incomplete texture in the ANGLE driver.
++    ANGLE_SKIP_TEST_IF(IsAdreno() && IsAndroid() && IsOpenGLES());
++
++    constexpr char kVS[] = R"(#version 300 es
++in highp vec2 position;
++out highp vec2 texCoord;
++void main()
++{
++    gl_Position = vec4(position, 0, 1);
++    texCoord = (position * 0.5) + 0.5;
++})";
++
++    constexpr char kSignedFS[] = R"(#version 300 es
++in highp vec2 texCoord;
++out highp vec4 color;
++uniform highp isampler2D tex;
++void main()
++{
++    color = vec4(texture(tex, texCoord)) / 127.0;
++})";
++
++    constexpr char kUnsignedFS[] = R"(#version 300 es
++in highp vec2 texCoord;
++out highp vec4 color;
++uniform highp usampler2D tex;
++void main()
++{
++    color = vec4(texture(tex, texCoord)) / 255.0;
++})";
++
++    for (const char *fs : {kSignedFS, kUnsignedFS})
++    {
++        glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
++        glClear(GL_COLOR_BUFFER_BIT);
++
++        // Since no texture has been bound, it is incomplete by definition.
++        ANGLE_GL_PROGRAM(program, kVS, fs);
++        drawQuad(program, "position", 0.5f);
++        ASSERT_GL_NO_ERROR();
++
++        const int width  = getWindowWidth() - 1;
++        const int height = getWindowHeight() - 1;
++        EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::black);
++        EXPECT_PIXEL_COLOR_EQ(width, 0, GLColor::black);
++        EXPECT_PIXEL_COLOR_EQ(0, height, GLColor::black);
++        EXPECT_PIXEL_COLOR_EQ(width, height, GLColor::black);
++    }
++}
++
+ ANGLE_INSTANTIATE_TEST_ES2(IncompleteTextureTest);
+ 
+ GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(IncompleteTextureTestES3);
