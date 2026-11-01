@@ -1,0 +1,2 @@
+# Illustrator files are PDF-based; treat them as binary so diffs stay readable.
+*.ai binary
