@@ -41,6 +41,7 @@ function Fetch {
   Push-Location "$work\angle"
   try {
     Invoke-Checked python scripts/bootstrap.py
+    Invoke-Checked python "$here\scripts\skip_deps.py" "$work\angle"
     Invoke-Checked gclient.bat sync -D --force --no-history --jobs 16
   } finally { Pop-Location }
 }

@@ -43,7 +43,9 @@ fetch() {
   fi
   git -C "$work/angle" fetch --quiet --depth 1 origin "$angle_commit"
   git -C "$work/angle" checkout --quiet --force "$angle_commit"
-  (cd "$work/angle" && python3 scripts/bootstrap.py && gclient sync -D --force --no-history --jobs 16)
+  (cd "$work/angle" && python3 scripts/bootstrap.py)
+  python3 "$here/scripts/skip_deps.py" "$work/angle"
+  (cd "$work/angle" && gclient sync -D --force --no-history --jobs 16)
 }
 
 out_dir() { echo "$work/angle/out/oxgl-$1"; }
