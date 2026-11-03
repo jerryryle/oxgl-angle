@@ -1,29 +1,31 @@
 # Builds the oxgl ANGLE bundles from the recipe in angle/ (pin.toml, GN args,
-# source patches, scripts, license data). Runs on every pull request and reports
-# one aggregate check, `angle-build`, which branch protection requires. A pull
-# request that changes the recipe builds, checks and smoke-tests all five
-# platforms and keeps the bundles as run artifacts; one that changes only this
-# workflow does the same without needing a new bundle_version; any other pull
-# request skips the builds. The arm64 Linux and Windows bundles are
-# cross-compiled on x64 runners and smoke-tested on arm64 runners in the smoke
-# job. A push to main that changes the recipe (a merged pull request) builds
-# and smoke-tests again and publishes the release; a manual run
-# (workflow_dispatch) from main does the same for an unreleased bundle_version,
-# such as after a failed release run. Copy the printed digests into oxgl's
-# angle/bundles.toml (see angle/README.md). A green manual run on
-# angle-bump.yml's `angle-bump` branch merges its pull request and runs this on
-# main (the merge-bump job). Published bundle versions are never rebuilt or
-# replaced.
+# source patches, scripts, license data) and releases them. Reports one
+# aggregate check, `angle-build`, which branch protection and the merge queue
+# require. A pull request runs workflow lint and the bundle-version guard; one
+# labelled full-ci also builds and smoke-tests (adding the label starts no run;
+# push, or run this by hand on the branch). A merge group (the merge queue)
+# builds, checks and smoke-tests all five platforms when its changes touch the
+# recipe or this workflow, and keeps the bundles as run artifacts; a
+# workflow-only change needs no new bundle_version. The arm64 Linux and Windows
+# bundles are cross-compiled on x64 runners and smoke-tested on arm64 runners in
+# the smoke job. A push to main that changed the recipe builds nothing: it
+# releases the bundles the merge group run for that commit built and
+# smoke-tested, then starts oxgl's bump. A manual run (workflow_dispatch) builds
+# and smoke-tests; on main it also releases an unreleased bundle_version, such
+# as after a merge that bypassed the queue. Published bundle versions are never
+# rebuilt or replaced.
 name: angle-build
 
 on:
   workflow_dispatch:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
-# A newer push to a pull request cancels its older run; runs on main are never
-# cancelled, so every merged recipe change gets its release.
+# A newer push to a pull request cancels its older run; merge group runs and
+# runs on main are never cancelled, so every merged recipe change gets its
+# release.
 concurrency:
   group: angle-build-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -38,17 +40,24 @@ env:
 
 jobs:
   # Which kind of change this is. recipe: a file that builds or tests a bundle
-  # changed (it needs a new bundle_version). build: the recipe or this workflow
-  # changed (the bundles are built and smoke-tested). Same script as oxgl's
-  # ci.yml `changes` job, also run on the commits a push to main adds, where
-  # only a recipe change builds (its pull request already built a workflow
-  # change, and there is nothing to release); when the changed files can't be
-  # determined (a manual run, or the diff fails), both are true.
+  # changed (it needs a new bundle_version). build: the bundles are built and
+  # smoke-tested, for a recipe or workflow change in a merge group, a manual
+  # run, or a full-ci pull request. own-recipe: the change's own diff, from the
+  # commit it is built on (own-base: a pull request's base, or the parent of a
+  # merge group's head, which is the entry queued ahead of it or main), touches
+  # the recipe, so the guard compares bundle_versions with own-base. A merge
+  # group's recipe and build use the cumulative range from main, so an entry
+  # queued behind a recipe change still builds the bundles its push releases. On
+  # a push, recipe decides whether the push releases and build is false. When
+  # the changed files can't be determined (a manual run, or the diff fails),
+  # recipe and build are true.
   changes:
     runs-on: ubuntu-24.04
     outputs:
       recipe: ${{ steps.match.outputs.recipe }}
       build: ${{ steps.match.outputs.build }}
+      own-recipe: ${{ steps.match.outputs.own-recipe }}
+      own-base: ${{ steps.match.outputs.own-base }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,25 +66,50 @@ jobs:
       - id: match
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          HEAD: ${{ github.event.pull_request.head.sha || github.event.after }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
-          recipe=true build=true
-          # --no-renames lists both sides of a rename, so moving a recipe file
-          # away still counts as changing it.
-          if [ "$EVENT" != workflow_dispatch ] && files="$(git diff --no-renames --name-only "$BASE...$HEAD")" && [ -n "$files" ]; then
-            recipe=false build=false
+          # Prints recipe when a file in the given range is in the recipe, build
+          # when one is in the recipe or this workflow, and nothing otherwise;
+          # fails when the range can't be listed or is empty. --no-renames lists
+          # both sides of a rename, so moving a recipe file away still counts.
+          kind() {
+            local files f out=
+            files="$(git diff --no-renames --name-only "$1")" && [ -n "$files" ] || return 1
             while IFS= read -r f; do
               case "$f" in
                 angle/pin.toml|angle/args/*|angle/patches/*|angle/build.sh|angle/build.ps1|angle/scripts/bundle.py|angle/scripts/pin.sh|angle/scripts/skip_deps.py|angle/smoke/*|angle/licenses.toml|angle/license-texts/*)
-                  recipe=true build=true ;;
-                .github/workflows/angle-build.yml)
-                  build=true ;;
+                  echo recipe; return ;;
+                .github/workflows/angle-build.yml) out=build ;;
               esac
             done <<< "$files"
-            [ "$EVENT" = push ] && build="$recipe"
+            echo "$out"
+          }
+          recipe=true build=true own_recipe=true own_base=
+          case "$EVENT" in
+            pull_request) range="$PR_BASE...$PR_HEAD" own_base="$PR_BASE" ;;
+            merge_group) range="$(git merge-base origin/main "$SHA")..$SHA" own_base="$(git rev-parse "$SHA^")" ;;
+            push) [[ "$BEFORE" =~ ^0+$ ]] && range= || range="$BEFORE..$SHA" ;;
+            *) range= ;;
+          esac
+          if [ -n "$range" ] && k="$(kind "$range")"; then
+            recipe=false build=false
+            [ "$k" = recipe ] && recipe=true build=true
+            [ "$k" = build ] && build=true
           fi
-          { echo "recipe=$recipe"; echo "build=$build"; } | tee -a "$GITHUB_OUTPUT"
+          if [ -n "$own_base" ] && k="$(kind "$own_base...$SHA")"; then
+            own_recipe=false
+            [ "$k" = recipe ] && own_recipe=true
+          fi
+          # Builds run in the queue, on a manual run, or when a pull request asks.
+          case "$EVENT" in
+            push) build=false ;;
+            pull_request) [ "$FULL_CI" = true ] || build=false ;;
+          esac
+          { echo "recipe=$recipe"; echo "build=$build"; echo "own-recipe=$own_recipe"; echo "own-base=$own_base"; } | tee -a "$GITHUB_OUTPUT"
 
   workflow-lint:
     runs-on: ubuntu-24.04
@@ -100,13 +134,16 @@ jobs:
 
   guard:
     needs: changes
-    if: needs.changes.outputs.recipe == 'true'
+    # A push releases what its merge group checked; the release refuses an
+    # existing release itself.
+    if: needs.changes.outputs.recipe == 'true' && github.event_name != 'push'
     # A recipe change needs a new bundle_version; fail in seconds, not after
     # the compile.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Refuse an already released bundle_version
         env:
@@ -121,6 +158,27 @@ jobs:
             *" 200"*) echo "::error::$tag is already released; bump bundle_version in angle/pin.toml"; exit 1 ;;
             *) echo "::error::could not check whether $tag is released (${status:-no response})"; exit 1 ;;
           esac
+      # Two recipe changes queued back to back are both tested before either
+      # releases, so the check above passes for both; requiring a version
+      # greater than the commit the change is built on catches the second.
+      - name: Require a bundle_version greater than the one this change is built on
+        if: needs.changes.outputs.own-recipe == 'true' && needs.changes.outputs.own-base != ''
+        env:
+          BASE: ${{ needs.changes.outputs.own-base }}
+        run: |
+          new="$(angle/scripts/pin.sh bundle_version)"
+          # Same parse as pin.sh, on the base's pin.toml.
+          old="$(git show "$BASE:angle/pin.toml" | sed -n 's/^bundle_version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+          # angle-<branch>.<n>: compare the branch, then n.
+          newest="$(printf '%s\n' "${old#angle-}" "${new#angle-}" | sort -t. -k1,1n -k2,2n | tail -n1)"
+          if [ -z "$old" ]; then
+            echo "::error::could not read bundle_version from angle/pin.toml at $BASE"
+            exit 1
+          fi
+          if [ "$old" = "$new" ] || [ "$newest" != "${new#angle-}" ]; then
+            echo "::error::bundle_version $new must be greater than $old, the version at $BASE"
+            exit 1
+          fi
 
   build:
     # Runs on a workflow-only change too, when guard is skipped.
@@ -297,20 +355,42 @@ jobs:
 
   release:
     needs: [changes, build, smoke]
-    # Releases come only from main: a push that changed the recipe, or a
-    # manual run. Never from a pull request.
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' || needs.changes.outputs.recipe == 'true')
+    # Releases come only from main: a push that changed the recipe, from its
+    # merge group run's bundles, or a manual run, from its own. Never from a
+    # pull request or a merge group.
+    if: >-
+      ${{ !cancelled() && github.ref == 'refs/heads/main'
+      && ((github.event_name == 'push' && needs.changes.outputs.recipe == 'true')
+          || (github.event_name == 'workflow_dispatch' && needs.smoke.result == 'success')) }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      # To download the merge group run's artifacts.
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Find the merge group run that built this commit
+        id: source
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          id="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/angle-build.yml/runs?event=merge_group&head_sha=$GITHUB_SHA&status=success" \
+            --jq '.workflow_runs[0].id // empty')"
+          if [ -z "$id" ]; then
+            echo "::error::no passing merge group run built $GITHUB_SHA (merged past the queue?); start angle-build manually on main to build, smoke-test and release it"
+            exit 1
+          fi
+          echo "run-id=$id" | tee -a "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: angle-*
           path: bundles
           merge-multiple: true
+          run-id: ${{ steps.source.outputs.run-id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Publish release and print digests
         env:
           GH_TOKEN: ${{ github.token }}
@@ -325,20 +405,35 @@ jobs:
             echo "::error::release $tag already exists; bump bundle_version in angle/pin.toml"
             exit 1
           fi
-          # Tag the commit whose recipe built these bundles, not the default branch.
+          # Tag the commit whose recipe built these bundles, not the default
+          # branch. The default token creates it, so oxgl's bump sees
+          # github-actions[bot] as its author and uploader.
           gh release create "$tag" bundles/*.tar.xz bundles/SHA256SUMS \
             --target "$GITHUB_SHA" --title "oxgl-ANGLE ${tag#angle-} ($branch)" \
-            --notes "ANGLE $commit built by angle/build.sh at ${GITHUB_SHA}. Digests are in SHA256SUMS; copy them into oxgl's angle/bundles.toml."
+            --notes "ANGLE $commit built by angle/build.sh at ${GITHUB_SHA}. Digests are in SHA256SUMS; oxgl's angle-bump workflow pins them in its angle/bundles.toml."
           {
             echo "### ANGLE bundle digests ($tag)"
             echo '```'
             cat bundles/SHA256SUMS
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+      # The App's token, created just before its one use: oxgl's bump proposes
+      # this release.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: bot
+        with:
+          client-id: ${{ secrets.OXGL_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.OXGL_BOT_PRIVATE_KEY }}
+          repositories: oxgl
+          permission-contents: write
+      - name: Start oxgl's bump
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+        run: gh api "repos/${GITHUB_REPOSITORY_OWNER}/oxgl/dispatches" -f event_type=angle-release > /dev/null
 
-  # The one check branch protection requires. A job may be skipped only when
-  # this change did not need it; any other skip (a broken `if:`, an upstream
-  # failure) fails the check.
+  # The one check branch protection and the merge queue require. A job may be
+  # skipped only when this run did not need it; any other skip (a broken `if:`,
+  # an upstream failure) fails the check.
   angle-build:
     if: always()
     needs: [changes, workflow-lint, guard, build, smoke, release]
@@ -354,60 +449,9 @@ jobs:
             def ok(skippable): .result == "success" or (.result == "skipped" and skippable);
             .changes.outputs as $c
             | (.changes | ok(false)) and (.["workflow-lint"] | ok(false))
-              and (.guard | ok($c.recipe == "false"))
+              and (.guard | ok($c.recipe == "false" or $event == "push"))
               and (.build | ok($c.build == "false"))
               and (.smoke | ok($c.build == "false"))
-              and (.release | ok($ref != "refs/heads/main" or ($event == "push" and $c.recipe == "false")))'
-
-  # Merges the green pull request from angle-bump.yml after the run its
-  # dispatch started, but only when the branch is exactly the change main's
-  # bump.py makes to main's pin.toml for the Chrome version its commit names,
-  # which bump.py requires to be a Linux stable release: anything else pushed to
-  # angle-bump (a fix, or a bump gone stale because main moved) waits for a
-  # person, so nothing reaches a release without review except an ANGLE commit
-  # a Chrome stable release pins. The version comes from the commit, not a new
-  # lookup of the current stable, so a Chrome release during the build doesn't
-  # hold up the merge.
-  # --match-head-commit merges only the commit this run tested. A merge with the
-  # default token triggers no push run, so this starts the run on main that
-  # publishes the release. The explicit status check matters: the implicit
-  # success() also looks at the skipped release job and would skip this job.
-  merge-bump:
-    needs: angle-build
-    if: >-
-      ${{ !cancelled() && needs.angle-build.result == 'success'
-      && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/angle-bump' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      pull-requests: write
-      actions: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Merge the bump pull request and release from main
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # The Chrome version angle-bump.yml put in its commit subject.
-          chrome="$(git log -1 --format=%s HEAD | sed -nE "s/^Pin Chrome ([0-9.]+)'s ANGLE .*/\1/p")"
-          if [ -z "$chrome" ]; then
-            echo "::notice::angle-bump's head is not angle-bump.yml's commit; merge it by hand"
-            exit 0
-          fi
-          # Rerun main's scripts, not the branch's, on main's pin.
-          expected="$RUNNER_TEMP/angle"
-          mkdir "$expected"
-          git show origin/main:angle/scripts/bump.py > "$RUNNER_TEMP/bump.py"
-          git show origin/main:angle/scripts/pin_only.sh > "$RUNNER_TEMP/pin_only.sh"
-          git show origin/main:angle/pin.toml > "$expected/pin.toml"
-          python3 "$RUNNER_TEMP/bump.py" "$expected" "$chrome" > /dev/null
-          if ! bash "$RUNNER_TEMP/pin_only.sh" origin/main HEAD \
-            || ! cmp -s "$expected/pin.toml" angle/pin.toml; then
-            echo "::notice::angle-bump is not exactly bump.py's change to main; merge it by hand"
-            exit 0
-          fi
-          gh pr merge angle-bump --repo "$GITHUB_REPOSITORY" --squash --match-head-commit "$GITHUB_SHA"
-          gh workflow run angle-build.yml --repo "$GITHUB_REPOSITORY" --ref main
+              and (.release | ok($ref != "refs/heads/main"
+                                 or ($event == "push" and $c.recipe == "false")
+                                 or ($event != "push" and $event != "workflow_dispatch")))'

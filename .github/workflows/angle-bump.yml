@@ -1,13 +1,13 @@
-# Daily, pins the ANGLE commit Chrome stable ships (angle/scripts/bump.py),
-# opens a pull request for it from the `angle-bump` branch and runs angle-build
-# on that branch. Pushes and pull requests made with the default token trigger
-# no workflows, but a workflow_dispatch does, and its `angle-build` check lands
-# on the pull request's head commit. When it passes, angle-build's merge-bump
-# job merges the pull request and runs angle-build on main, which publishes the
-# release. An open bump is refreshed when main or Chrome stable moves on, and
-# closed when main needs no bump, unless it carries a fix pushed to its branch; a
-# bump that fails (a patch that no longer applies, say) stays open for that fix,
-# which a person merges. A closed bump labelled skip-bump skips its ANGLE commit.
+# Daily, pins the ANGLE commit Chrome stable ships (angle/scripts/bump.py) and
+# opens a pull request for it from the `angle-bump` branch, as the oxgl-js
+# GitHub App so that angle-build runs on it, with auto-merge on: the merge
+# queue builds and smoke-tests the bundles and lands it, and the push to main
+# releases them. An open bump is rebuilt only when the pin it would make
+# changes (Chrome stable moved, or main's bundle_version or pin.toml moved), so
+# a bump building in the queue isn't pulled out; it's closed when main needs no
+# bump. A bump carrying a fix pushed to its branch is left alone, and lands
+# through the queue once its checks pass. A closed bump labelled skip-bump
+# skips its ANGLE commit.
 name: angle-bump
 
 on:
@@ -24,19 +24,23 @@ permissions:
 jobs:
   bump:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-      pull-requests: write
-      actions: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # All branches, to compare an open bump with this one.
           fetch-depth: 0
           persist-credentials: false
+      # The App's token, so the pull request starts CI and can enter the queue.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: bot
+        with:
+          client-id: ${{ secrets.OXGL_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.OXGL_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
       - name: Pin Chrome stable's ANGLE and open or refresh the pull request
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
         run: |
           out="$(python3 angle/scripts/bump.py)"
           open="$(gh pr list --repo "$GITHUB_REPOSITORY" --head angle-bump --state open --json number --jq length)"
@@ -62,7 +66,7 @@ jobs:
             exit 0
           fi
           title="Pin Chrome $chrome's ANGLE ($tag)"
-          body="ANGLE $commit from $(angle/scripts/pin.sh chromium_branch), the commit Chrome $chrome's DEPS pins. angle-build merges this when it passes, unless someone pushes to this branch: merge such a fix by hand. To skip this ANGLE commit, label this skip-bump and close it."
+          body="ANGLE $commit from $(angle/scripts/pin.sh chromium_branch), the commit Chrome $chrome's DEPS pins. It lands through the merge queue once its checks pass, which builds and smoke-tests the bundles; the push to main releases them. To skip this ANGLE commit, label this skip-bump and close it."
           git -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -q -m "$title" angle/pin.toml
@@ -72,4 +76,5 @@ jobs:
           else
             gh pr create --repo "$GITHUB_REPOSITORY" --base main --head angle-bump --title "$title" --body "$body"
           fi
-          gh workflow run angle-build.yml --repo "$GITHUB_REPOSITORY" --ref angle-bump
+          # The merge queue sets the merge method (squash).
+          gh pr merge angle-bump --repo "$GITHUB_REPOSITORY" --auto

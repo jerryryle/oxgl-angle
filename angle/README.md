@@ -112,16 +112,27 @@ GN args, targets, source patches, scripts, license data) gets a new
 published bundles are never rebuilt or replaced, because rebuilds are not
 bit-identical and older oxgl commits pin the old digests.
 
-The `angle-build` workflow runs on every pull request and reports one
-`angle-build` check, which branch protection requires. It builds and
+The `angle-build` workflow reports one `angle-build` check, which branch
+protection and the merge queue require. Changes reach `main` through the merge
+queue. A pull request runs workflow lint and the `bundle_version` guard; with the
+`full-ci` label, its runs from its next push on also build and smoke-test it,
+and a manual run of `angle-build` on its branch does so at once. The queue builds and
 smoke-tests all five platforms when the recipe or the workflow itself changed,
 and skips the builds otherwise. A change to the workflow alone (such as a
 Dependabot action bump) builds and smoke-tests but needs no new
-`bundle_version`, since nothing is released from a pull request. When a recipe
-change merges, `angle-build` builds and smoke-tests it again on `main` and
-publishes the release named after `bundle_version`, with the digests in its
-summary. If that run fails, rerun it, or run `angle-build` by hand from `main`
-(Actions → angle-build → Run workflow).
+`bundle_version`, since only a recipe change releases. When a recipe change
+lands, the `angle-build` run on `main` builds nothing: it publishes the bundles
+the queue run built and smoke-tested, as the release named after
+`bundle_version`, with the digests in its summary, and then starts oxgl's
+`angle-bump` workflow, which proposes the release. If that run fails, rerun it.
+A recipe change merged past the queue has no queue run to release from: run
+`angle-build` by hand from `main` (Actions → angle-build → Run workflow), which
+builds, smoke-tests and releases it.
+
+The guard fails a recipe change whose `bundle_version` is already released, or
+isn't greater than the one at the commit it's built on (a pull request's base,
+or the entry queued ahead of it), so two recipe changes queued back to back
+can't share a version.
 
 ### New Chrome stable releases
 
@@ -129,35 +140,28 @@ The `angle-bump` workflow checks daily for a new Chrome stable release whose
 Chromium DEPS pins a newer ANGLE commit (`scripts/bump.py`; it never follows
 stable back to an older branch or an older commit on the pinned one). It sets
 `angle_commit`, `chromium_branch` and `bundle_version` (`angle-<branch>.1` on
-a new branch, `.<n+1>` on the pinned one) and opens a pull request from the
-`angle-bump` branch, then runs `angle-build` on that branch. When it passes,
-the `merge-bump` job merges the pull request and runs `angle-build` on `main`,
-which publishes the release.
+a new branch, `.<n+1>` on the pinned one), opens a pull request from the
+`angle-bump` branch and turns on auto-merge, so it lands through the merge
+queue once its checks pass, and the push to `main` releases it.
 
-`merge-bump` merges only the exact change `bump.py` makes to `main`'s
-`pin.toml` for the Chrome stable release named in the bump's commit, rerunning
-`main`'s copy of the script to check, so nothing else pushed to `angle-bump`
-reaches a release without review. A bump that fails (say, a patch no longer
-applies) stays open: push the fix to `angle-bump`, and merge it yourself once
-green; the merge publishes the release. Unless it carries such a fix, the next
-daily run refreshes a bump that went stale because `main` or Chrome stable
-moved on, and closes one `main` no longer needs. To skip an ANGLE commit, add
-the `skip-bump` label to its pull request and close it; remove the label to
-retry.
+A bump that fails in the queue (say, a patch no longer applies) leaves the
+queue and stays open: push the fix to `angle-bump`, and it lands through the
+queue once its checks pass. The daily run leaves a branch carrying such a fix
+alone. Otherwise it rebuilds an open bump only when the pin it would make
+changed (Chrome stable moved, or `main`'s `pin.toml` did), so a bump building
+in the queue isn't pulled out, and closes one `main` no longer needs. To skip
+an ANGLE commit, add the `skip-bump` label to its pull request and close it;
+remove the label to retry.
 
-Both workflows use only the default `GITHUB_TOKEN`. Its pushes, pull requests
-and merges trigger no workflows, which is why they start `angle-build` with
-`gh workflow run` instead. This relies on three repository settings: "Allow
-GitHub Actions to create and approve pull requests" (Settings → Actions →
-General), and, in the "Default (bypassable)" ruleset, no required approving
-review and no extra approval for unattributed changes (both would hold a pull
-request the workflow opened for a human review). The ruleset keeps the
-required `angle-build` check. Without a required review, anyone with write
-access can merge any pull request; this repository accepts that because it has
-a single maintainer, and because oxgl uses a bundle only after its digests are
-copied into oxgl's `angle/bundles.toml` in a reviewed pull request. With more
-maintainers, give the workflows a GitHub App token instead and list the App as
-a ruleset bypass actor, so review can be required of everyone else.
+The bump opens its pull request as the `oxgl-js` GitHub App (secrets
+`OXGL_BOT_CLIENT_ID` and `OXGL_BOT_PRIVATE_KEY`), because pull requests made
+with the default `GITHUB_TOKEN` start no CI and couldn't enter the queue. The
+release itself uses the default token, so oxgl's bump sees
+`github-actions[bot]` as its author and uploader. No review is required: anyone
+with write access can land a change, and a passing Chrome-stable bump lands,
+releases and reaches oxgl's bump without a person. This repository accepts
+that because it has a single maintainer. With more maintainers, require a
+review and list the App as a ruleset bypass actor.
 
 ### By hand
 
@@ -165,18 +169,20 @@ a ruleset bypass actor, so review can be required of everyone else.
    `angle/build.sh all <platform>` (later runs recompile only what changed) and
    point oxgl at the result with `OXGL_ANGLE_DIR`.
 2. Open a PR with the recipe change and a bumped `bundle_version` in
-   `pin.toml` (`angle-NNNN.<n+1>`; for a new ANGLE version, pick the commit
+   `pin.toml` (`angle-NNNN.<n+1>`, greater than `main`'s; for a new ANGLE version, pick the commit
    Chrome stable ships, listed on chromiumdash.appspot.com, and set
    `angle_commit`, `chromium_branch` and `angle-<branch>.1`). `angle-build`
-   fails within seconds if the version is already released, within minutes if
-   a GN arg or license check fails (`bundle.py --preflight`), and otherwise
-   builds, checks and smoke-tests all five platforms.
-3. After it merges, the `angle-build` run on `main` publishes the release.
-4. In oxgl, copy each platform's URL and sha256, and the `bundle_version`,
-   into `angle/bundles.toml`, run `python3 angle/scripts/check_pin.py`, and open
-   a PR. oxgl's CI builds and tests against the new bundles; after an ANGLE
-   update, also recheck oxgl's "Known upstream issues" (its `angle/README.md`).
-   Step 4 applies to an automatic bump too.
+   fails within seconds if the version is already released or not greater than
+   the base's. To build, check and smoke-test all five platforms before queueing it,
+   run `angle-build` by hand on its branch, or label it `full-ci` and push; the queue does that in any case, failing
+   within minutes if a GN arg or license check fails (`bundle.py --preflight`).
+3. Queue it (Merge when ready). After it lands, the `angle-build` run on
+   `main` publishes the release and starts oxgl's bump.
+4. oxgl's bump opens a pull request pinning the release and lands it through
+   oxgl's queue, which runs the full suite against the new bundles. If it fails
+   there, fix it on oxgl's `angle-bump` branch. After an ANGLE update, also
+   recheck oxgl's "Known upstream issues" (its `angle/README.md`). This applies
+   to an automatic bump too.
 
 A deleted or broken release asset is replaced the same way, under a new
 `bundle_version`.
