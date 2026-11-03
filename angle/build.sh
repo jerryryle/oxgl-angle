@@ -22,6 +22,7 @@ bundle_version="$("$here/scripts/pin.sh" bundle_version)"
 export PATH="$work/depot_tools:$PATH"
 export DEPOT_TOOLS_UPDATE=0          # keep depot_tools at the pinned commit
 export DEPOT_TOOLS_WIN_TOOLCHAIN=0   # use the locally installed Visual Studio
+export DEPOT_TOOLS_METRICS=0         # no metrics config or its network probe
 if [[ "$(uname -s)" == Darwin && -d /Applications/Xcode.app ]]; then
   # ANGLE needs the full Xcode SDK; select it for this build only.
   export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
