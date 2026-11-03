@@ -1,2 +1,3 @@
 target_cpu = "arm64"
 angle_enable_metal = true
+angle_enable_gl = false

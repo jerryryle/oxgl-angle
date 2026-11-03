@@ -22,6 +22,7 @@ arm64 runners.
 | `patches/*.patch` | Source patches applied to the ANGLE checkout before `gn gen`, for settings no GN arg reaches (see [Source patches](#source-patches)) |
 | `build.sh`, `build.ps1` | Build recipe (`fetch`, `build`, `bundle`, `all`) for macOS/Linux and Windows (x64 and arm64) |
 | `scripts/bundle.py` | Assembles the bundle and enforces the outcome checks |
+| `scripts/skip_deps.py` | Makes `gclient sync` skip DEPS entries no bundle target uses, such as `third_party/clang-format/script`, whose pinned commit the mirror no longer serves |
 | `scripts/check_pin.py` | Validates `pin.toml` |
 | `scripts/bump.py` | Pins `pin.toml` to the ANGLE commit Chrome stable ships (run daily by `angle-bump`) |
 | `scripts/pin_only.sh` | Whether an `angle-bump` branch changes only `pin.toml` (no fix pushed on top) |
@@ -41,10 +42,19 @@ BUILD_INFO.json   commit, GN args, toolchain, components with SPDX licenses, fil
 Bundles are `angle-<platform>.tar.xz`; unstripped libraries are in
 `angle-<platform>-symbols.tar.xz`.
 
+The Linux bundles also enable ANGLE's OpenGL ES backend, which oxgl uses on
+GPUs whose Vulkan driver ANGLE caps at OpenGL ES 2.0 (such as the Raspberry
+Pi 5's V3D). It reaches the system's EGL through Mesa's surfaceless platform
+and opens `libEGL.so.1` with `dlopen` only when that display is initialized,
+so the libraries link no EGL, GL, GBM or libdrm library and load on machines
+without Mesa. ANGLE's own libdrm copy (`third_party/libdrm`) is linked
+statically and must stay unexported.
+
 `bundle.py` fails the build if a required library or the ICD manifest is
 missing, a required backend is not enabled, a linked component's license is
 missing or not on the allowlist in `deny.toml`, or (Linux) a library links
-X11/xcb/Wayland or needs glibc newer than 2.31. On Linux arm64 it also fails
+X11/xcb/Wayland or the system EGL/GL/GBM/libdrm libraries, exports `drm*`
+symbols, or needs glibc newer than 2.31. On Linux arm64 it also fails
 if any library has a `LOAD` segment aligned below 64 KiB: arm64 kernels use 4,
 16 or 64 KiB pages, and only 64 KiB alignment loads under all of them. The
 smallest alignment is recorded in `BUILD_INFO.json` as `min_load_align`.
@@ -94,7 +104,7 @@ in an oxgl checkout.
 ## Changing ANGLE
 
 The recipe is every file that builds or tests a bundle: `pin.toml`, `args/`,
-`patches/`, `build.sh`, `build.ps1`, `scripts/bundle.py`, `scripts/pin.sh`, `smoke/`,
+`patches/`, `build.sh`, `build.ps1`, `scripts/bundle.py`, `scripts/pin.sh`, `scripts/skip_deps.py`, `smoke/`,
 `licenses.toml` and `license-texts/`. Any recipe change (a new ANGLE commit,
 GN args, targets, source patches, scripts, license data) gets a new
 `bundle_version`:

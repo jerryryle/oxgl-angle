@@ -4,3 +4,10 @@ target_cpu = "arm64"
 # Headless: no display-server integrations, so no libX11/xcb/wayland linkage.
 angle_use_x11 = false
 angle_use_wayland = false
+# ANGLE's OpenGL ES backend, for GPUs whose Vulkan driver ANGLE caps at
+# OpenGL ES 2.0 (such as the Raspberry Pi 5's V3D). It reaches the system's
+# EGL through Mesa's surfaceless platform and opens libEGL.so.1 only when that
+# display is initialized, so the libraries link no EGL or GL library. Desktop
+# GL is never selected.
+angle_enable_gl = true
+angle_enable_gl_desktop_backend = false

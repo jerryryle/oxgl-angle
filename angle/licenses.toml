@@ -26,3 +26,10 @@ files = [
     "third_party/SwiftShader/third_party/llvm-10.0/llvm/include/llvm/Support/LICENSE.TXT",
     "third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/Support/COPYRIGHT.regex",
 ]
+
+# libdrm has no license file. Each file carries its own MIT notice, so the
+# notices of the files ANGLE's GL backend compiles (third_party/libdrm
+# BUILD.gn, static_library "libdrm") are kept in this repository, verbatim.
+[components."third_party/libdrm"]
+license = "MIT"
+files = ["repo:angle/license-texts/libdrm-2.4.122.LICENSE"]

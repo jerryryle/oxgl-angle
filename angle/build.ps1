@@ -21,6 +21,7 @@ $out = Join-Path $work "angle\out\oxgl-$platform"
 $env:PATH = "$work\depot_tools;$env:PATH"
 $env:DEPOT_TOOLS_UPDATE = '0'
 $env:DEPOT_TOOLS_WIN_TOOLCHAIN = '0'
+$env:DEPOT_TOOLS_METRICS = '0'   # no metrics config or its network probe
 
 function Invoke-Checked { & $args[0] $args[1..($args.Count - 1)]; if ($LASTEXITCODE) { throw "$($args -join ' ') failed ($LASTEXITCODE)" } }
 
@@ -41,6 +42,7 @@ function Fetch {
   Push-Location "$work\angle"
   try {
     Invoke-Checked python scripts/bootstrap.py
+    Invoke-Checked python "$here\scripts\skip_deps.py" "$work\angle"
     Invoke-Checked gclient.bat sync -D --force --no-history --jobs 16
   } finally { Pop-Location }
 }
