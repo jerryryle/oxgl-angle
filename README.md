@@ -1,7 +1,7 @@
 # oxgl-angle
 
 The build recipe for the [ANGLE](https://chromium.googlesource.com/angle/angle)
-bundles that [oxgl](https://github.com/jerryryle/oxgl) renders with. It builds
+bundles that [oxgl](https://github.com/oxgl-js/oxgl) renders with. It builds
 ANGLE (with SwiftShader as the software fallback) from a pinned revision for
 five platforms and publishes the bundles as releases of this repository. oxgl
 pins a release's URLs and digests in its own `angle/bundles.toml`.
