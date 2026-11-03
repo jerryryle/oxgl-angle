@@ -6,7 +6,6 @@ angle_build_tests = false
 angle_has_frame_capture = false
 angle_enable_vulkan = true
 angle_enable_swiftshader = true
-angle_enable_gl = false
 angle_enable_null = false
 angle_enable_perfetto = false
 # ANGLE enables its WebGPU backend by default on macOS and Windows; it links

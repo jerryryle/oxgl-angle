@@ -2,3 +2,4 @@
 target_cpu = "arm64"
 angle_enable_d3d11 = true
 angle_enable_d3d9 = false
+angle_enable_gl = false
