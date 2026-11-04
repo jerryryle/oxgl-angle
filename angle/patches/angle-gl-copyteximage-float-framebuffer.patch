@@ -61,11 +61,48 @@ index 8610e70..2d865ca 100644
                                      const gl::ImageIndex &index,
                                      const gl::Rectangle &sourceArea,
 diff --git a/src/libANGLE/renderer/gl/BlitGL.cpp b/src/libANGLE/renderer/gl/BlitGL.cpp
-index 833e3db..8850663 100644
+index 833e3db..81d9a17 100644
 --- a/src/libANGLE/renderer/gl/BlitGL.cpp
 +++ b/src/libANGLE/renderer/gl/BlitGL.cpp
-@@ -476,7 +476,7 @@ angle::Result BlitGL::copySubImageToLUMAWorkaroundTexture(const gl::Context *con
-     }
+@@ -425,14 +425,14 @@ angle::Result BlitGL::copyImageToLUMAWorkaroundTexture(const gl::Context *contex
+     mStateManager->bindTexture(textureType, texture);
+ 
+     // Allocate the texture memory
+-    GLenum format   = gl::GetUnsizedFormat(internalFormat);
+-    GLenum readType = source->getImplementationColorReadType(context);
++    GLenum format = gl::GetUnsizedFormat(internalFormat);
+ 
+-    // getImplementationColorReadType aligns the type with ES client version
+-    if (readType == GL_HALF_FLOAT_OES && mFunctions->standard == STANDARD_GL_DESKTOP)
+-    {
+-        readType = GL_HALF_FLOAT;
+-    }
++    // getImplementationColorReadType aligns the type with ES client version. Convert it to the
++    // type the native driver expects for the format.
++    GLenum readType =
++        nativegl::GetTexSubImageFormat(mFunctions, mFeatures, format,
++                                       source->getImplementationColorReadType(context))
++            .type;
+ 
+     gl::PixelUnpackState unpack;
+     ANGLE_TRY(mStateManager->setPixelUnpackState(context, unpack));
+@@ -467,16 +467,16 @@ angle::Result BlitGL::copySubImageToLUMAWorkaroundTexture(const gl::Context *con
+     mStateManager->bindFramebuffer(GL_FRAMEBUFFER, sourceFramebufferGL->getFramebufferID());
+ 
+     GLenum readFormat = source->getImplementationColorReadFormat(context);
+-    GLenum readType   = source->getImplementationColorReadType(context);
+ 
+-    // getImplementationColorReadType aligns the type with ES client version
+-    if (readType == GL_HALF_FLOAT_OES && mFunctions->standard == STANDARD_GL_DESKTOP)
+-    {
+-        readType = GL_HALF_FLOAT;
+-    }
++    // getImplementationColorReadType aligns the type with ES client version. Convert it to the
++    // type the native driver expects for the format.
++    GLenum readType =
++        nativegl::GetTexSubImageFormat(mFunctions, mFeatures, readFormat,
++                                       source->getImplementationColorReadType(context))
++            .type;
  
      nativegl::CopyTexImageImageFormat copyTexImageFormat =
 -        nativegl::GetCopyTexImageImageFormat(mFunctions, mFeatures, readFormat);
@@ -135,10 +172,10 @@ index 91cecfe..ff93c8b 100644
                              const gl::ImageIndex &index,
                              const gl::Rectangle &sourceArea,
 diff --git a/src/libANGLE/renderer/gl/formatutilsgl.cpp b/src/libANGLE/renderer/gl/formatutilsgl.cpp
-index d53f2b7..e348521 100644
+index d53f2b7..0538f5f 100644
 --- a/src/libANGLE/renderer/gl/formatutilsgl.cpp
 +++ b/src/libANGLE/renderer/gl/formatutilsgl.cpp
-@@ -880,13 +880,36 @@ CompressedTexSubImageFormat GetCompressedSubTexImageFormat(const FunctionsGL *fu
+@@ -880,13 +880,46 @@ CompressedTexSubImageFormat GetCompressedSubTexImageFormat(const FunctionsGL *fu
      return result;
  }
  
@@ -175,6 +212,16 @@ index d53f2b7..e348521 100644
 -    const gl::InternalFormat &formatInfo =
 -        gl::GetInternalFormatInfo(internalFormat, GL_UNSIGNED_BYTE);
 +    const gl::InternalFormat &formatInfo = GetCopyTexImageInternalFormatInfo(internalFormat, type);
++    if (functions->isAtLeastGLES(gl::Version(3, 0)) && formatInfo.componentType == GL_FLOAT &&
++        formatInfo.isLUMA())
++    {
++        // OpenGL ES 3.0 has no sized floating-point luminance or alpha formats, and drivers such
++        // as Mesa's refuse to copy a floating-point color buffer into the unsized ones. Back them
++        // with R or RG textures, as when the driver lacks OES_texture_half_float or
++        // OES_texture_float.
++        result.internalFormat = EmulateLUMA(formatInfo).sizedInternalFormat;
++        return result;
++    }
      result.internalFormat = GetTexImageNativeInternalFormat(functions, features, formatInfo);
      return result;
  }
