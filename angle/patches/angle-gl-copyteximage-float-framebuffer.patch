@@ -375,10 +375,10 @@ index 15e6698..d9516ac 100644
  struct TexStorageFormat
  {
 diff --git a/src/tests/gl_tests/CopyTexImageTest.cpp b/src/tests/gl_tests/CopyTexImageTest.cpp
-index f0a0330..73a1f39 100644
+index f0a0330..54caa12 100644
 --- a/src/tests/gl_tests/CopyTexImageTest.cpp
 +++ b/src/tests/gl_tests/CopyTexImageTest.cpp
-@@ -1098,6 +1098,53 @@ TEST_P(CopyTexImageTest, CopyTexSubImageMesaYFlip)
+@@ -1098,6 +1098,104 @@ TEST_P(CopyTexImageTest, CopyTexSubImageMesaYFlip)
  
  // Tests that set RobustResourceInit to true, so that code path with
  // RobustResourceInit == true can be checked
@@ -421,6 +421,57 @@ index f0a0330..73a1f39 100644
 +        glClearColor(0.25f, 0.5f, 0.75f, 0.75f);
 +        glClear(GL_COLOR_BUFFER_BIT);
 +        glCopyTexImage2D(GL_TEXTURE_2D, 0, testCase.format, 0, 0, kSize, kSize, 0);
++        ASSERT_GL_NO_ERROR();
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f);
++        EXPECT_PIXEL_COLOR_NEAR(getWindowWidth() / 2, getWindowHeight() / 2, testCase.expected, 2);
++    }
++}
++
++// Test that a half-float framebuffer can be copied into part of a half-float luminance/alpha
++// texture defined by glTexImage2D.
++TEST_P(CopyTexImageTest, HalfFloatToLUMASubImage)
++{
++    ANGLE_SKIP_TEST_IF(getClientMajorVersion() >= 3);
++    ANGLE_SKIP_TEST_IF(!EnsureGLExtensionEnabled("GL_OES_texture_half_float") ||
++                       !EnsureGLExtensionEnabled("GL_EXT_color_buffer_half_float"));
++
++    ANGLE_GL_PROGRAM(program, essl1_shaders::vs::Texture2D(), essl1_shaders::fs::Texture2D());
++
++    constexpr GLsizei kSize = 4;
++    const struct
++    {
++        GLenum format;
++        GLColor expected;
++    } kCases[] = {{GL_LUMINANCE, GLColor(64, 64, 64, 255)},
++                  {GL_ALPHA, GLColor(0, 0, 0, 191)},
++                  {GL_LUMINANCE_ALPHA, GLColor(64, 64, 64, 191)}};
++
++    GLTexture source;
++    glBindTexture(GL_TEXTURE_2D, source);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kSize, kSize, 0, GL_RGBA, GL_HALF_FLOAT_OES, nullptr);
++
++    GLFramebuffer framebuffer;
++    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source, 0);
++    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++    glClearColor(0.25f, 0.5f, 0.75f, 0.75f);
++    glClear(GL_COLOR_BUFFER_BIT);
++
++    for (const auto &testCase : kCases)
++    {
++        SCOPED_TRACE(testing::Message() << "format=0x" << std::hex << testCase.format);
++
++        GLTexture texture;
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glTexImage2D(GL_TEXTURE_2D, 0, testCase.format, kSize, kSize, 0, testCase.format,
++                     GL_HALF_FLOAT_OES, nullptr);
++
++        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kSize, kSize);
 +        ASSERT_GL_NO_ERROR();
 +
 +        glBindFramebuffer(GL_FRAMEBUFFER, 0);

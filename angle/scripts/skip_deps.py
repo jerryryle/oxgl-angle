@@ -20,7 +20,7 @@ from pathlib import Path
 
 SKIPPED = ("third_party/clang-format/script",)
 ANCHOR = '"custom_deps" : {'
-ANDROID_TARGET = re.compile(r"^target_os\s*=.*android.*\n?", re.MULTILINE)
+ANDROID_TARGET = re.compile(r"^target_os\s*=\s*\[[^\]]*android[^\]]*\]\s*\n?", re.MULTILINE)
 
 
 def main() -> None:
@@ -32,6 +32,8 @@ def main() -> None:
         sys.exit(f"skip_deps: expected one {ANCHOR!r} in {gclient}")
     entries = "".join(f'\n      "{dep}": None,' for dep in SKIPPED if f'"{dep}"' not in text)
     text = ANDROID_TARGET.sub("", text.replace(ANCHOR, ANCHOR + entries))
+    if "android" in text:
+        sys.exit(f"skip_deps: could not remove the android target_os from {gclient}")
     gclient.write_text(text)
 
 
