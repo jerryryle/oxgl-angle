@@ -22,7 +22,7 @@ arm64 runners.
 | `patches/*.patch` | Source patches applied to the ANGLE checkout before `gn gen`, for settings no GN arg reaches (see [Source patches](#source-patches)) |
 | `build.sh`, `build.ps1` | Build recipe (`fetch`, `build`, `bundle`, `all`) for macOS/Linux and Windows (x64 and arm64) |
 | `scripts/bundle.py` | Assembles the bundle and enforces the outcome checks |
-| `scripts/skip_deps.py` | Makes `gclient sync` skip DEPS entries no bundle target uses, such as `third_party/clang-format/script`, whose pinned commit the mirror no longer serves |
+| `scripts/skip_deps.py` | Makes `gclient sync` skip DEPS entries no bundle target uses: `third_party/clang-format/script`, whose pinned commit the mirror no longer serves, and on Linux the Android SDK, NDK and JDK, which ANGLE's `bootstrap.py` requests and which filled CI runners' disks |
 | `scripts/check_pin.py` | Validates `pin.toml` |
 | `scripts/bump.py` | Pins `pin.toml` to the ANGLE commit Chrome stable ships (run daily by `angle-bump`) |
 | `scripts/pin_only.sh` | Whether an `angle-bump` branch changes only `pin.toml` (no fix pushed on top) |
