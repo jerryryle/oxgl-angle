@@ -1,0 +1,415 @@
+diff --git a/src/libANGLE/Texture.cpp b/src/libANGLE/Texture.cpp
+index 9f438a9..90cb81b 100644
+--- a/src/libANGLE/Texture.cpp
++++ b/src/libANGLE/Texture.cpp
+@@ -1651,7 +1651,7 @@ angle::Result Texture::copyImage(Context *context,
+     ImageIndex index = ImageIndex::MakeFromTarget(target, level, 1);
+ 
+     const InternalFormat &internalFormatInfo =
+-        GetInternalFormatInfo(internalFormat, GL_UNSIGNED_BYTE);
++        mTexture->getCopyImageInternalFormat(context, internalFormat, source);
+ 
+     // Most if not all renderers clip these copies to the size of the source framebuffer, leaving
+     // other pixels untouched. For safety in robust resource initialization, assume that that
+diff --git a/src/libANGLE/renderer/TextureImpl.cpp b/src/libANGLE/renderer/TextureImpl.cpp
+index 084a09c..1cda84f 100644
+--- a/src/libANGLE/renderer/TextureImpl.cpp
++++ b/src/libANGLE/renderer/TextureImpl.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include "libANGLE/renderer/TextureImpl.h"
+ 
++#include "libANGLE/formatutils.h"
++
+ namespace rx
+ {
+ TextureImpl::TextureImpl(const gl::TextureState &state) : mState(state) {}
+@@ -16,6 +18,17 @@ TextureImpl::~TextureImpl() {}
+ 
+ void TextureImpl::onDestroy(const gl::Context *context) {}
+ 
++const gl::InternalFormat &TextureImpl::getCopyImageInternalFormat(const gl::Context *context,
++                                                                  GLenum internalFormat,
++                                                                  gl::Framebuffer *source) const
++{
++    // In ES 2.0 / WebGL 1, non-GL backends (TextureVk, TextureD3D,
++    // TextureMtl) currently still resolve unsized glCopyTexImage2D
++    // formats using GL_UNSIGNED_BYTE and convert/clamp float or
++    // half-float sources to 8-bit UNORM via a shader blit.
++    return gl::GetInternalFormatInfo(internalFormat, GL_UNSIGNED_BYTE);
++}
++
+ angle::Result TextureImpl::copyTexture(const gl::Context *context,
+                                        const gl::ImageIndex &index,
+                                        GLenum internalFormat,
+diff --git a/src/libANGLE/renderer/TextureImpl.h b/src/libANGLE/renderer/TextureImpl.h
+index 8610e70..2d865ca 100644
+--- a/src/libANGLE/renderer/TextureImpl.h
++++ b/src/libANGLE/renderer/TextureImpl.h
+@@ -78,6 +78,13 @@ class TextureImpl : public FramebufferAttachmentObjectImpl
+                                                 size_t imageSize,
+                                                 const uint8_t *pixels) = 0;
+ 
++    // Provides an interposition point for backends to resolve the effective gl::InternalFormat
++    // stored in TextureState by Texture::copyImage (for example, using the source framebuffer's
++    // implementation color read type for unsized internal formats instead of defaulting to
++    // GL_UNSIGNED_BYTE).
++    virtual const gl::InternalFormat &getCopyImageInternalFormat(const gl::Context *context,
++                                                                 GLenum internalFormat,
++                                                                 gl::Framebuffer *source) const;
+     virtual angle::Result copyImage(const gl::Context *context,
+                                     const gl::ImageIndex &index,
+                                     const gl::Rectangle &sourceArea,
+diff --git a/src/libANGLE/renderer/gl/BlitGL.cpp b/src/libANGLE/renderer/gl/BlitGL.cpp
+index 833e3db..8850663 100644
+--- a/src/libANGLE/renderer/gl/BlitGL.cpp
++++ b/src/libANGLE/renderer/gl/BlitGL.cpp
+@@ -476,7 +476,7 @@ angle::Result BlitGL::copySubImageToLUMAWorkaroundTexture(const gl::Context *con
+     }
+ 
+     nativegl::CopyTexImageImageFormat copyTexImageFormat =
+-        nativegl::GetCopyTexImageImageFormat(mFunctions, mFeatures, readFormat);
++        nativegl::GetCopyTexImageImageFormat(mFunctions, mFeatures, readFormat, readType);
+ 
+     mStateManager->bindTexture(gl::TextureType::_2D, mScratchTextures[0]);
+     ANGLE_GL_TRY_ALWAYS_CHECK(
+@@ -652,7 +652,7 @@ angle::Result BlitGL::blitColorBufferWithShader(const gl::Context *context,
+ 
+         const gl::InternalFormat &sourceInternalFormat       = *readAttachment->getFormat().info;
+         nativegl::CopyTexImageImageFormat copyTexImageFormat = nativegl::GetCopyTexImageImageFormat(
+-            mFunctions, mFeatures, sourceInternalFormat.internalFormat);
++            mFunctions, mFeatures, sourceInternalFormat.internalFormat, sourceInternalFormat.type);
+         const FramebufferGL *sourceGL = GetImplAs<FramebufferGL>(source);
+         mStateManager->bindFramebuffer(GL_READ_FRAMEBUFFER, sourceGL->getFramebufferID());
+         mStateManager->bindTexture(gl::TextureType::_2D, textureId);
+diff --git a/src/libANGLE/renderer/gl/TextureGL.cpp b/src/libANGLE/renderer/gl/TextureGL.cpp
+index 1dde822..0f91471 100644
+--- a/src/libANGLE/renderer/gl/TextureGL.cpp
++++ b/src/libANGLE/renderer/gl/TextureGL.cpp
+@@ -1058,6 +1058,18 @@ angle::Result TextureGL::handleCopyImageSelfCopyRedefine(const gl::Context *cont
+     return angle::Result::Continue;
+ }
+ 
++const gl::InternalFormat &TextureGL::getCopyImageInternalFormat(const gl::Context *context,
++                                                                GLenum internalFormat,
++                                                                gl::Framebuffer *source) const
++{
++    // TextureGL::copyImage allocates unsized destination internal formats using the source
++    // framebuffer's implementation color read type (e.g., preserving floating-point component types
++    // when copying from a float or half-float framebuffer in ES 2.0 / WebGL 1). Return the matching
++    // format info so TextureState's ImageDesc stays consistent with the allocated native texture.
++    return nativegl::GetCopyTexImageInternalFormatInfo(
++        internalFormat, source->getImplementationColorReadType(context));
++}
++
+ angle::Result TextureGL::copyImage(const gl::Context *context,
+                                    const gl::ImageIndex &index,
+                                    const gl::Rectangle &sourceArea,
+@@ -1073,11 +1085,11 @@ angle::Result TextureGL::copyImage(const gl::Context *context,
+     size_t level             = static_cast<size_t>(index.getLevelIndex());
+     GLenum type              = source->getImplementationColorReadType(context);
+     const gl::InternalFormat &originalInternalFormatInfo =
+-        gl::GetInternalFormatInfo(internalFormat, type);
++        nativegl::GetCopyTexImageInternalFormatInfo(internalFormat, type);
+     nativegl::CopyTexImageImageFormat copyTexImageFormat =
+-        nativegl::GetCopyTexImageImageFormat(functions, features, internalFormat);
++        nativegl::GetCopyTexImageImageFormat(functions, features, internalFormat, type);
+     const gl::InternalFormat &copyInternalFormatInfo =
+-        gl::GetInternalFormatInfo(copyTexImageFormat.internalFormat, GL_UNSIGNED_BYTE);
++        nativegl::GetCopyTexImageInternalFormatInfo(copyTexImageFormat.internalFormat, type);
+     nativegl::TexImageFormat initTexImageFormat =
+         nativegl::GetTexImageFormat(functions, features, internalFormat,
+                                     copyInternalFormatInfo.format, copyInternalFormatInfo.type);
+diff --git a/src/libANGLE/renderer/gl/TextureGL.h b/src/libANGLE/renderer/gl/TextureGL.h
+index 91cecfe..ff93c8b 100644
+--- a/src/libANGLE/renderer/gl/TextureGL.h
++++ b/src/libANGLE/renderer/gl/TextureGL.h
+@@ -100,6 +100,9 @@ class TextureGL : public TextureImpl
+                                         size_t imageSize,
+                                         const uint8_t *pixels) override;
+ 
++    const gl::InternalFormat &getCopyImageInternalFormat(const gl::Context *context,
++                                                         GLenum internalFormat,
++                                                         gl::Framebuffer *source) const override;
+     angle::Result copyImage(const gl::Context *context,
+                             const gl::ImageIndex &index,
+                             const gl::Rectangle &sourceArea,
+diff --git a/src/libANGLE/renderer/gl/formatutilsgl.cpp b/src/libANGLE/renderer/gl/formatutilsgl.cpp
+index d53f2b7..e348521 100644
+--- a/src/libANGLE/renderer/gl/formatutilsgl.cpp
++++ b/src/libANGLE/renderer/gl/formatutilsgl.cpp
+@@ -880,13 +880,36 @@ CompressedTexSubImageFormat GetCompressedSubTexImageFormat(const FunctionsGL *fu
+     return result;
+ }
+ 
++const gl::InternalFormat &GetCopyTexImageInternalFormatInfo(GLenum internalFormat, GLenum type)
++{
++    if (type == GL_HALF_FLOAT)
++    {
++        type = GL_HALF_FLOAT_OES;
++    }
++    else if (type == GL_UNSIGNED_SHORT_4_4_4_4 || type == GL_UNSIGNED_SHORT_5_5_5_1 ||
++             type == GL_UNSIGNED_SHORT_5_6_5)
++    {
++        // Each 16-bit packed type is only valid with one specific unsized format (GL_RGBA or
++        // GL_RGB), and copying from a 16-bit packed framebuffer into an unsized destination
++        // internal format (including GL_LUMINANCE, GL_LUMINANCE_ALPHA, or GL_ALPHA, or when sizing
++        // for glTexStorage2D) resolves to an 8-bit per channel unsigned normalized format.
++        type = GL_UNSIGNED_BYTE;
++    }
++    const gl::InternalFormat &formatInfo = gl::GetInternalFormatInfo(internalFormat, type);
++    if (formatInfo.internalFormat == GL_NONE)
++    {
++        return gl::GetInternalFormatInfo(internalFormat, GL_UNSIGNED_BYTE);
++    }
++    return formatInfo;
++}
++
+ CopyTexImageImageFormat GetCopyTexImageImageFormat(const FunctionsGL *functions,
+                                                    const angle::FeaturesGL &features,
+-                                                   GLenum internalFormat)
++                                                   GLenum internalFormat,
++                                                   GLenum type)
+ {
+     CopyTexImageImageFormat result;
+-    const gl::InternalFormat &formatInfo =
+-        gl::GetInternalFormatInfo(internalFormat, GL_UNSIGNED_BYTE);
++    const gl::InternalFormat &formatInfo = GetCopyTexImageInternalFormatInfo(internalFormat, type);
+     result.internalFormat = GetTexImageNativeInternalFormat(functions, features, formatInfo);
+     return result;
+ }
+diff --git a/src/libANGLE/renderer/gl/formatutilsgl.h b/src/libANGLE/renderer/gl/formatutilsgl.h
+index 15e6698..d9516ac 100644
+--- a/src/libANGLE/renderer/gl/formatutilsgl.h
++++ b/src/libANGLE/renderer/gl/formatutilsgl.h
+@@ -23,6 +23,11 @@ namespace angle
+ struct FeaturesGL;
+ }  // namespace angle
+ 
++namespace gl
++{
++struct InternalFormat;
++}  // namespace gl
++
+ namespace rx
+ {
+ 
+@@ -101,13 +106,16 @@ CompressedTexSubImageFormat GetCompressedSubTexImageFormat(const FunctionsGL *fu
+                                                            const angle::FeaturesGL &features,
+                                                            GLenum format);
+ 
++const gl::InternalFormat &GetCopyTexImageInternalFormatInfo(GLenum internalFormat, GLenum type);
++
+ struct CopyTexImageImageFormat
+ {
+     GLenum internalFormat = GL_NONE;
+ };
+ CopyTexImageImageFormat GetCopyTexImageImageFormat(const FunctionsGL *functions,
+                                                    const angle::FeaturesGL &features,
+-                                                   GLenum internalFormat);
++                                                   GLenum internalFormat,
++                                                   GLenum type);
+ 
+ struct TexStorageFormat
+ {
+diff --git a/src/tests/gl_tests/WebGLCompatibilityTest.cpp b/src/tests/gl_tests/WebGLCompatibilityTest.cpp
+index f304aa2..581b16f 100644
+--- a/src/tests/gl_tests/WebGLCompatibilityTest.cpp
++++ b/src/tests/gl_tests/WebGLCompatibilityTest.cpp
+@@ -8247,6 +8247,196 @@ TEST_P(WebGL2CompatibilityTest, CubeMapArrayNotSupported)
+     EXPECT_GL_ERROR(GL_INVALID_ENUM);
+ }
+ 
++constexpr std::array<float, 4> kCopyTestFullColor = {0.125f, 0.25f, 0.5f, 0.75f};
++constexpr std::array<float, 4> kCopyTestSubColor  = {0.875f, 0.625f, 0.375f, 0.25f};
++
++GLColor ExpectedSampledCopyColor(GLenum destFormat, const std::array<float, 4> &src)
++{
++    auto toByte = [](float v) -> GLubyte {
++        return static_cast<GLubyte>(std::round(std::clamp(v, 0.0f, 1.0f) * 255.0f));
++    };
++    const GLubyte r = toByte(src[0]);
++    const GLubyte g = toByte(src[1]);
++    const GLubyte b = toByte(src[2]);
++    const GLubyte a = toByte(src[3]);
++    switch (destFormat)
++    {
++        case GL_R8:
++        case GL_R16F:
++        case GL_R32F:
++            return GLColor(r, 0, 0, 255);
++        case GL_RG8:
++        case GL_RG16F:
++        case GL_RG32F:
++            return GLColor(r, g, 0, 255);
++        case GL_RGB:
++        case GL_RGB8:
++        case GL_SRGB8:
++        case GL_RGB16F:
++        case GL_RGB32F:
++        case GL_R11F_G11F_B10F:
++            return GLColor(r, g, b, 255);
++        case GL_RGBA:
++        case GL_RGBA8:
++        case GL_SRGB8_ALPHA8:
++        case GL_RGBA16F:
++        case GL_RGBA32F:
++            return GLColor(r, g, b, a);
++        case GL_LUMINANCE:
++            return GLColor(r, r, r, 255);
++        case GL_ALPHA:
++            return GLColor(0, 0, 0, a);
++        case GL_LUMINANCE_ALPHA:
++            return GLColor(r, r, r, a);
++        default:
++            UNREACHABLE();
++            return GLColor::black;
++    }
++}
++
++// Verify that glCopyTexImage2D into unsized internal formats from floating-point framebuffers
++// preserves the floating-point component type in TextureState (both for out-of-bounds copies that
++// take the setImage + copySubImage path and for in-bounds copies that are subsequently attached to
++// another framebuffer and copied from).
++TEST_P(WebGLCompatibilityTest, CopyTexImageFromFloatFramebufferPreservesType)
++{
++    const bool isWebGL2 = getClientMajorVersion() >= 3;
++    if (!isWebGL2)
++    {
++        ANGLE_SKIP_TEST_IF(!EnsureGLExtensionEnabled("GL_OES_texture_half_float"));
++    }
++    ANGLE_SKIP_TEST_IF(!EnsureGLExtensionEnabled("GL_EXT_color_buffer_half_float"));
++
++    ANGLE_GL_PROGRAM(copyVerifyProgram, essl1_shaders::vs::Texture2D(),
++                     essl1_shaders::fs::Texture2D());
++
++    auto runTestForType = [&](GLenum srcInternalFormat, GLenum srcType,
++                              const std::vector<GLenum> &destFormats,
++                              GLenum intermediateInternalFormat) {
++        SCOPED_TRACE(testing::Message() << "srcInternalFormat=0x" << std::hex << srcInternalFormat
++                                        << " srcType=0x" << srcType);
++        constexpr GLsizei kSize = 8;
++
++        GLTexture srcTex;
++        glBindTexture(GL_TEXTURE_2D, srcTex);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glTexImage2D(GL_TEXTURE_2D, 0, srcInternalFormat, kSize, kSize, 0, GL_RGBA, srcType,
++                     nullptr);
++        ASSERT_GL_NO_ERROR();
++
++        GLFramebuffer srcFbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, srcFbo);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, srcTex, 0);
++        ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
++
++        // glCopyTexImage2D into intermediateTex, followed by attaching that texture to a second
++        // FBO, querying its component type, reading pixels as float, and copying from the second
++        // FBO into destination formats. On the GL backend, if Texture::copyImage recorded
++        // GL_UNSIGNED_BYTE in TextureState, the second FBO's attachment format and implementation
++        // color read type would be GL_UNSIGNED_BYTE while the native texture is floating-point,
++        // causing componentType queries, float glReadPixels, and subsequent copies from the second
++        // FBO to fail.
++        glBindFramebuffer(GL_FRAMEBUFFER, srcFbo);
++        glClearColor(kCopyTestFullColor[0], kCopyTestFullColor[1], kCopyTestFullColor[2],
++                     kCopyTestFullColor[3]);
++        glClear(GL_COLOR_BUFFER_BIT);
++
++        GLTexture intermediateTex;
++        glBindTexture(GL_TEXTURE_2D, intermediateTex);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glCopyTexImage2D(GL_TEXTURE_2D, 0, intermediateInternalFormat, 0, 0, kSize, kSize, 0);
++        ASSERT_GL_NO_ERROR();
++
++        GLFramebuffer intermediateFbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, intermediateFbo);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, intermediateTex,
++                               0);
++        ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
++
++        GLint componentType = 0;
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_NO_ERROR();
++        if (isWebGL2 || IsOpenGL())
++        {
++            EXPECT_GLENUM_EQ(GL_FLOAT, componentType);
++            std::array<float, 4> readPixel = {};
++            glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, readPixel.data());
++            EXPECT_GL_NO_ERROR();
++            for (size_t i = 0; i < 4; ++i)
++            {
++                EXPECT_NEAR(kCopyTestFullColor[i], readPixel[i], 0.02f);
++            }
++        }
++        else
++        {
++            EXPECT_TRUE(componentType == GL_FLOAT || componentType == GL_UNSIGNED_NORMALIZED_EXT);
++        }
++
++        for (GLenum dstFormat : destFormats)
++        {
++            SCOPED_TRACE(testing::Message() << "Chained dstFormat=0x" << std::hex << dstFormat);
++            glBindFramebuffer(GL_FRAMEBUFFER, intermediateFbo);
++            glClearColor(kCopyTestFullColor[0], kCopyTestFullColor[1], kCopyTestFullColor[2],
++                         kCopyTestFullColor[3]);
++            glClear(GL_COLOR_BUFFER_BIT);
++
++            GLTexture finalTex;
++            glBindTexture(GL_TEXTURE_2D, finalTex);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++            glCopyTexImage2D(GL_TEXTURE_2D, 0, dstFormat, 0, 0, kSize, kSize, 0);
++            EXPECT_GL_NO_ERROR();
++
++            glClearColor(kCopyTestSubColor[0], kCopyTestSubColor[1], kCopyTestSubColor[2],
++                         kCopyTestSubColor[3]);
++            glClear(GL_COLOR_BUFFER_BIT);
++            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kSize / 2, kSize / 2);
++            EXPECT_GL_NO_ERROR();
++
++            glBindFramebuffer(GL_FRAMEBUFFER, 0);
++            drawQuad(copyVerifyProgram, essl1_shaders::PositionAttrib(), 0.5f, 1.0f, true);
++            EXPECT_GL_NO_ERROR();
++
++            const GLColor expectedSub  = ExpectedSampledCopyColor(dstFormat, kCopyTestSubColor);
++            const GLColor expectedFull = ExpectedSampledCopyColor(dstFormat, kCopyTestFullColor);
++            EXPECT_PIXEL_NEAR(getWindowWidth() / 4, getWindowHeight() / 4, expectedSub.R,
++                              expectedSub.G, expectedSub.B, expectedSub.A, 2);
++            EXPECT_PIXEL_NEAR(getWindowWidth() * 3 / 4, getWindowHeight() * 3 / 4, expectedFull.R,
++                              expectedFull.G, expectedFull.B, expectedFull.A, 2);
++        }
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    };
++
++    if (isWebGL2)
++    {
++        runTestForType(GL_RGBA16F, GL_HALF_FLOAT, {GL_R16F, GL_RG16F, GL_RGB16F, GL_RGBA16F},
++                       GL_RGBA16F);
++        if (EnsureGLExtensionEnabled("GL_EXT_color_buffer_float"))
++        {
++            runTestForType(GL_RGBA32F, GL_FLOAT, {GL_R32F, GL_RG32F, GL_RGB32F, GL_RGBA32F},
++                           GL_RGBA32F);
++        }
++    }
++    else
++    {
++        const std::vector<GLenum> kUnsizedDestFormats = {GL_RGBA, GL_RGB, GL_LUMINANCE, GL_ALPHA,
++                                                         GL_LUMINANCE_ALPHA};
++        runTestForType(GL_RGBA, GL_HALF_FLOAT_OES, kUnsizedDestFormats, GL_RGBA);
++        if (EnsureGLExtensionEnabled("GL_OES_texture_float") &&
++            EnsureGLExtensionEnabled("GL_WEBGL_color_buffer_float"))
++        {
++            runTestForType(GL_RGBA, GL_FLOAT, kUnsizedDestFormats, GL_RGBA);
++        }
++    }
++}
++
+ // Test that drawing GL_POINTS without setting gl_PointSize in the vertex shader
+ // renders points with a default size of 1.0 pixel.
+ TEST_P(WebGLCompatibilityTest, PointSizeDefaultWhenNotSet)

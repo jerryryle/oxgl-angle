@@ -1,0 +1,173 @@
+diff --git a/src/libANGLE/renderer/gl/FramebufferGL.cpp b/src/libANGLE/renderer/gl/FramebufferGL.cpp
+index ca7caee..320d2e2 100644
+--- a/src/libANGLE/renderer/gl/FramebufferGL.cpp
++++ b/src/libANGLE/renderer/gl/FramebufferGL.cpp
+@@ -755,6 +755,38 @@ angle::Result FramebufferGL::clearBufferfi(const gl::Context *context,
+     return angle::Result::Continue;
+ }
+ 
++const gl::InternalFormat &FramebufferGL::getImplementationColorReadFormat(
++    const gl::Context *context) const
++{
++    const gl::InternalFormat &format = *mState.getReadAttachment()->getFormat().info;
++    if (GetFunctionsGL(context)->standard != STANDARD_GL_ES)
++    {
++        return format;
++    }
++
++    // An OpenGL ES driver reads a color buffer only in the format and type ES 3.0.6 section 4.3.2
++    // requires for its component type, or in its own implementation-chosen format and type, which
++    // can differ from the attachment's. Advertise the required pair where the driver may not
++    // accept the attachment's own format and type:
++    // - RGBA/UNSIGNED_BYTE for RGB8, which drivers such as Mesa's store padded to four components
++    //   and read as RGBA.
++    // - RGBA_INTEGER/UNSIGNED_INT and RGBA_INTEGER/INT for integer formats. Mesa, for example,
++    //   rejects reading RGBA16UI as RGBA_INTEGER/UNSIGNED_SHORT.
++    if (format.sizedInternalFormat == GL_RGB8)
++    {
++        return gl::GetSizedInternalFormatInfo(GL_RGBA8);
++    }
++    if (format.componentType == GL_UNSIGNED_INT)
++    {
++        return gl::GetSizedInternalFormatInfo(GL_RGBA32UI);
++    }
++    if (format.componentType == GL_INT)
++    {
++        return gl::GetSizedInternalFormatInfo(GL_RGBA32I);
++    }
++    return format;
++}
++
+ angle::Result FramebufferGL::readPixels(const gl::Context *context,
+                                         const gl::Rectangle &area,
+                                         GLenum format,
+diff --git a/src/libANGLE/renderer/gl/FramebufferGL.h b/src/libANGLE/renderer/gl/FramebufferGL.h
+index 31c5706..8d06b1a 100644
+--- a/src/libANGLE/renderer/gl/FramebufferGL.h
++++ b/src/libANGLE/renderer/gl/FramebufferGL.h
+@@ -67,6 +67,8 @@ class FramebufferGL : public FramebufferImpl
+                                 GLfloat depth,
+                                 GLint stencil) override;
+ 
++    const gl::InternalFormat &getImplementationColorReadFormat(
++        const gl::Context *context) const override;
+     angle::Result readPixels(const gl::Context *context,
+                              const gl::Rectangle &area,
+                              GLenum format,
+diff --git a/src/tests/gl_tests/ReadPixelsTest.cpp b/src/tests/gl_tests/ReadPixelsTest.cpp
+index 16be449..75efa2a 100644
+--- a/src/tests/gl_tests/ReadPixelsTest.cpp
++++ b/src/tests/gl_tests/ReadPixelsTest.cpp
+@@ -63,6 +63,112 @@ TEST_P(ReadPixelsTest, OutOfBounds)
+     }
+ }
+ 
++// Test that an RGB framebuffer can be read with its implementation-chosen format and type.
++TEST_P(ReadPixelsTest, RGBImplementationColorReadFormat)
++{
++    GLTexture tex;
++    glBindTexture(GL_TEXTURE_2D, tex);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 4, 4, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
++
++    GLFramebuffer fbo;
++    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
++    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++
++    glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
++    glClear(GL_COLOR_BUFFER_BIT);
++
++    GLint format = 0;
++    GLint type   = 0;
++    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &format);
++    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &type);
++    ASSERT_GL_NO_ERROR();
++    ASSERT_EQ(GL_UNSIGNED_BYTE, type);
++
++    std::array<GLubyte, 4> pixel = {};
++    glReadPixels(0, 0, 1, 1, format, type, pixel.data());
++    EXPECT_GL_NO_ERROR();
++    EXPECT_EQ(255, pixel[0]);
++    EXPECT_EQ(0, pixel[1]);
++    EXPECT_EQ(0, pixel[2]);
++}
++
++// Test that integer framebuffers can be read with their implementation-chosen format and type.
++TEST_P(ReadPixelsTest, IntegerImplementationColorReadFormat)
++{
++    ANGLE_SKIP_TEST_IF(getClientMajorVersion() < 3);
++
++    constexpr GLenum kUnsignedFormats[] = {GL_R8UI,     GL_RG16UI,   GL_RGBA8UI,
++                                           GL_RGBA16UI, GL_RGBA32UI, GL_RGB10_A2UI};
++    constexpr GLenum kSignedFormats[]   = {GL_R8I, GL_RG16I, GL_RGBA8I, GL_RGBA16I, GL_RGBA32I};
++
++    auto readRed = [](GLenum type, const std::array<GLuint, 4> &pixel) -> GLint {
++        switch (type)
++        {
++            case GL_UNSIGNED_BYTE:
++                return reinterpret_cast<const GLubyte *>(pixel.data())[0];
++            case GL_BYTE:
++                return reinterpret_cast<const GLbyte *>(pixel.data())[0];
++            case GL_UNSIGNED_SHORT:
++                return reinterpret_cast<const GLushort *>(pixel.data())[0];
++            case GL_SHORT:
++                return reinterpret_cast<const GLshort *>(pixel.data())[0];
++            case GL_UNSIGNED_INT:
++            case GL_INT:
++                return static_cast<GLint>(pixel[0]);
++            case GL_UNSIGNED_INT_2_10_10_10_REV:
++                return static_cast<GLint>(pixel[0] & 0x3FF);
++            default:
++                return -1;
++        }
++    };
++
++    auto test = [&](GLenum internalFormat, bool isSigned) {
++        SCOPED_TRACE(testing::Message() << "internalFormat=0x" << std::hex << internalFormat);
++
++        GLRenderbuffer rbo;
++        glBindRenderbuffer(GL_RENDERBUFFER, rbo);
++        glRenderbufferStorage(GL_RENDERBUFFER, internalFormat, 4, 4);
++
++        GLFramebuffer fbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
++        ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++
++        const GLint expected = isSigned ? -100 : 100;
++        if (isSigned)
++        {
++            const GLint color[4] = {expected, 0, 0, 1};
++            glClearBufferiv(GL_COLOR, 0, color);
++        }
++        else
++        {
++            const GLuint color[4] = {static_cast<GLuint>(expected), 0, 0, 1};
++            glClearBufferuiv(GL_COLOR, 0, color);
++        }
++
++        GLint format = 0;
++        GLint type   = 0;
++        glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &format);
++        glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &type);
++        ASSERT_GL_NO_ERROR();
++
++        std::array<GLuint, 4> pixel = {};
++        glReadPixels(0, 0, 1, 1, format, type, pixel.data());
++        EXPECT_GL_NO_ERROR();
++        EXPECT_EQ(expected, readRed(type, pixel));
++    };
++
++    for (GLenum internalFormat : kUnsignedFormats)
++    {
++        test(internalFormat, false);
++    }
++    for (GLenum internalFormat : kSignedFormats)
++    {
++        test(internalFormat, true);
++    }
++}
++
+ // Test readPixels with a large texture to verify no overflow in pitch calculations.
+ TEST_P(ReadPixelsTest, LargeTexture)
+ {
