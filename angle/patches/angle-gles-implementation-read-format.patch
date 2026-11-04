@@ -1,8 +1,8 @@
 diff --git a/src/libANGLE/renderer/gl/FramebufferGL.cpp b/src/libANGLE/renderer/gl/FramebufferGL.cpp
-index ca7caee..320d2e2 100644
+index ca7caee..b52e302 100644
 --- a/src/libANGLE/renderer/gl/FramebufferGL.cpp
 +++ b/src/libANGLE/renderer/gl/FramebufferGL.cpp
-@@ -755,6 +755,38 @@ angle::Result FramebufferGL::clearBufferfi(const gl::Context *context,
+@@ -755,6 +755,34 @@ angle::Result FramebufferGL::clearBufferfi(const gl::Context *context,
      return angle::Result::Continue;
  }
  
@@ -21,19 +21,15 @@ index ca7caee..320d2e2 100644
 +    // accept the attachment's own format and type:
 +    // - RGBA/UNSIGNED_BYTE for RGB8, which drivers such as Mesa's store padded to four components
 +    //   and read as RGBA.
-+    // - RGBA_INTEGER/UNSIGNED_INT and RGBA_INTEGER/INT for integer formats. Mesa, for example,
-+    //   rejects reading RGBA16UI as RGBA_INTEGER/UNSIGNED_SHORT.
++    // - RGBA_INTEGER/UNSIGNED_INT for 16-bit unsigned integer formats, which drivers such as
++    //   Mesa's reject reading as RGBA_INTEGER/UNSIGNED_SHORT.
 +    if (format.sizedInternalFormat == GL_RGB8)
 +    {
 +        return gl::GetSizedInternalFormatInfo(GL_RGBA8);
 +    }
-+    if (format.componentType == GL_UNSIGNED_INT)
++    if (format.componentType == GL_UNSIGNED_INT && format.type == GL_UNSIGNED_SHORT)
 +    {
 +        return gl::GetSizedInternalFormatInfo(GL_RGBA32UI);
-+    }
-+    if (format.componentType == GL_INT)
-+    {
-+        return gl::GetSizedInternalFormatInfo(GL_RGBA32I);
 +    }
 +    return format;
 +}
