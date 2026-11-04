@@ -61,48 +61,54 @@ index 8610e70..2d865ca 100644
                                      const gl::ImageIndex &index,
                                      const gl::Rectangle &sourceArea,
 diff --git a/src/libANGLE/renderer/gl/BlitGL.cpp b/src/libANGLE/renderer/gl/BlitGL.cpp
-index 833e3db..81d9a17 100644
+index 833e3db..583e4d6 100644
 --- a/src/libANGLE/renderer/gl/BlitGL.cpp
 +++ b/src/libANGLE/renderer/gl/BlitGL.cpp
-@@ -425,14 +425,14 @@ angle::Result BlitGL::copyImageToLUMAWorkaroundTexture(const gl::Context *contex
-     mStateManager->bindTexture(textureType, texture);
- 
-     // Allocate the texture memory
--    GLenum format   = gl::GetUnsizedFormat(internalFormat);
--    GLenum readType = source->getImplementationColorReadType(context);
-+    GLenum format = gl::GetUnsizedFormat(internalFormat);
+@@ -428,11 +428,21 @@ angle::Result BlitGL::copyImageToLUMAWorkaroundTexture(const gl::Context *contex
+     GLenum format   = gl::GetUnsizedFormat(internalFormat);
+     GLenum readType = source->getImplementationColorReadType(context);
  
 -    // getImplementationColorReadType aligns the type with ES client version
 -    if (readType == GL_HALF_FLOAT_OES && mFunctions->standard == STANDARD_GL_DESKTOP)
--    {
--        readType = GL_HALF_FLOAT;
--    }
-+    // getImplementationColorReadType aligns the type with ES client version. Convert it to the
-+    // type the native driver expects for the format.
-+    GLenum readType =
-+        nativegl::GetTexSubImageFormat(mFunctions, mFeatures, format,
-+                                       source->getImplementationColorReadType(context))
-+            .type;
++    // getImplementationColorReadType aligns the type with ES client version, but desktop GL and
++    // ES 3.0+ accept only GL_HALF_FLOAT with the sized formats used here.
++    if (readType == GL_HALF_FLOAT_OES && (mFunctions->standard == STANDARD_GL_DESKTOP ||
++                                          mFunctions->isAtLeastGLES(gl::Version(3, 0))))
+     {
+         readType = GL_HALF_FLOAT;
+     }
++    else if (readType == GL_UNSIGNED_SHORT_4_4_4_4 || readType == GL_UNSIGNED_SHORT_5_5_5_1 ||
++             readType == GL_UNSIGNED_SHORT_5_6_5)
++    {
++        // 16-bit packed types are only valid with their specific GL_RGB or GL_RGBA formats, not
++        // with the GL_RED or GL_RG formats used to emulate LUMA textures. Allocate the workaround
++        // texture with 8-bit unsigned normalized channels instead.
++        readType = GL_UNSIGNED_BYTE;
++    }
  
      gl::PixelUnpackState unpack;
      ANGLE_TRY(mStateManager->setPixelUnpackState(context, unpack));
-@@ -467,16 +467,16 @@ angle::Result BlitGL::copySubImageToLUMAWorkaroundTexture(const gl::Context *con
-     mStateManager->bindFramebuffer(GL_FRAMEBUFFER, sourceFramebufferGL->getFramebufferID());
- 
+@@ -469,14 +479,24 @@ angle::Result BlitGL::copySubImageToLUMAWorkaroundTexture(const gl::Context *con
      GLenum readFormat = source->getImplementationColorReadFormat(context);
--    GLenum readType   = source->getImplementationColorReadType(context);
+     GLenum readType   = source->getImplementationColorReadType(context);
  
 -    // getImplementationColorReadType aligns the type with ES client version
 -    if (readType == GL_HALF_FLOAT_OES && mFunctions->standard == STANDARD_GL_DESKTOP)
--    {
--        readType = GL_HALF_FLOAT;
--    }
-+    // getImplementationColorReadType aligns the type with ES client version. Convert it to the
-+    // type the native driver expects for the format.
-+    GLenum readType =
-+        nativegl::GetTexSubImageFormat(mFunctions, mFeatures, readFormat,
-+                                       source->getImplementationColorReadType(context))
-+            .type;
++    // getImplementationColorReadType aligns the type with ES client version, but desktop GL and
++    // ES 3.0+ accept only GL_HALF_FLOAT with the sized formats used here.
++    if (readType == GL_HALF_FLOAT_OES && (mFunctions->standard == STANDARD_GL_DESKTOP ||
++                                          mFunctions->isAtLeastGLES(gl::Version(3, 0))))
+     {
+         readType = GL_HALF_FLOAT;
+     }
++    else if (readType == GL_UNSIGNED_SHORT_4_4_4_4 || readType == GL_UNSIGNED_SHORT_5_5_5_1 ||
++             readType == GL_UNSIGNED_SHORT_5_6_5)
++    {
++        // 16-bit packed types are only valid with their specific GL_RGB or GL_RGBA formats, not
++        // with the GL_RED or GL_RG formats used to emulate LUMA textures. Allocate the workaround
++        // texture with 8-bit unsigned normalized channels instead.
++        readType = GL_UNSIGNED_BYTE;
++    }
  
      nativegl::CopyTexImageImageFormat copyTexImageFormat =
 -        nativegl::GetCopyTexImageImageFormat(mFunctions, mFeatures, readFormat);
@@ -110,7 +116,7 @@ index 833e3db..81d9a17 100644
  
      mStateManager->bindTexture(gl::TextureType::_2D, mScratchTextures[0]);
      ANGLE_GL_TRY_ALWAYS_CHECK(
-@@ -652,7 +652,7 @@ angle::Result BlitGL::blitColorBufferWithShader(const gl::Context *context,
+@@ -652,7 +672,7 @@ angle::Result BlitGL::blitColorBufferWithShader(const gl::Context *context,
  
          const gl::InternalFormat &sourceInternalFormat       = *readAttachment->getFormat().info;
          nativegl::CopyTexImageImageFormat copyTexImageFormat = nativegl::GetCopyTexImageImageFormat(
@@ -241,10 +247,92 @@ index 91cecfe..525dbea 100644
  
      std::vector<LevelInfoGL> mLevelInfo;
 diff --git a/src/libANGLE/renderer/gl/formatutilsgl.cpp b/src/libANGLE/renderer/gl/formatutilsgl.cpp
-index d53f2b7..0538f5f 100644
+index d53f2b7..5c9adc9 100644
 --- a/src/libANGLE/renderer/gl/formatutilsgl.cpp
 +++ b/src/libANGLE/renderer/gl/formatutilsgl.cpp
-@@ -880,13 +880,46 @@ CompressedTexSubImageFormat GetCompressedSubTexImageFormat(const FunctionsGL *fu
+@@ -533,24 +533,20 @@ static GLenum GetNativeInternalFormat(const FunctionsGL *functions,
+     {
+         if (internalFormat.componentType == GL_FLOAT)
+         {
+-            if (!internalFormat.isLUMA())
++            if (IsLUMAFormat(internalFormat.format))
++            {
++                // The legacy luminance/alpha formats from OES_texture_float and
++                // OES_texture_half_float are emulated with sized R/RG textures on ES 3.0+ so that
++                // they have sized internal formats (which is required when copying from
++                // floating-point framebuffers via glCopyTexImage2D / glCopyTexSubImage2D).
++                result = EmulateLUMA(internalFormat).sizedInternalFormat;
++            }
++            else
+             {
+                 // Use sized internal formats for floating point textures.  Extensions such as
+                 // EXT_color_buffer_float require the sized formats to be renderable.
+                 result = internalFormat.sizedInternalFormat;
+             }
+-            else if ((internalFormat.type == GL_FLOAT &&
+-                      !functions->hasGLESExtension("GL_OES_texture_float")) ||
+-                     (internalFormat.type == GL_HALF_FLOAT_OES &&
+-                      !functions->hasGLESExtension("GL_OES_texture_half_float")))
+-            {
+-                // The legacy luminance/alpha formats from OES_texture_float are emulated with R/RG
+-                // textures.
+-                if (IsLUMAFormat(internalFormat.format))
+-                {
+-                    result = EmulateLUMA(internalFormat).sizedInternalFormat;
+-                }
+-            }
+         }
+         else if (internalFormat.format == GL_RED_EXT || internalFormat.format == GL_RG_EXT)
+         {
+@@ -716,12 +712,10 @@ static GLenum GetNativeFormat(const FunctionsGL *functions,
+             }
+         }
+ 
+-        if ((type == GL_FLOAT && !functions->hasGLESExtension("GL_OES_texture_float")) ||
+-            (type == GL_HALF_FLOAT_OES &&
+-             !functions->hasGLESExtension("GL_OES_texture_half_float")))
++        if (type == GL_FLOAT || type == GL_HALF_FLOAT_OES || type == GL_HALF_FLOAT)
+         {
+-            // On ES 3.0 systems that don't have GL_OES_texture_float or OES_texture_half_float, the
+-            // LUMINANCE/ALPHA formats from those extensions must be emulated with R/RG textures.
++            // On ES 3.0+, floating-point LUMINANCE/ALPHA formats are emulated with sized R/RG
++            // storage, so the LUMINANCE/ALPHA formats must be uploaded with GL_RED / GL_RG.
+             if (IsLUMAFormat(format))
+             {
+                 result = EmulateLUMAFormat(format);
+@@ -767,28 +761,15 @@ static GLenum GetNativeType(const FunctionsGL *functions,
+ {
+     GLenum result = type;
+ 
+-    if (functions->standard == STANDARD_GL_DESKTOP)
++    if (functions->standard == STANDARD_GL_DESKTOP || functions->isAtLeastGLES(gl::Version(3, 0)))
+     {
+         if (type == GL_HALF_FLOAT_OES)
+         {
+-            // The enums differ for the OES half float extensions and desktop GL spec.
+-            // Update it.
++            // The enums differ for the OES half float extensions and desktop GL / ES 3.0+ spec
++            // (where half-float LUMA formats are emulated with sized R/RG textures). Update it.
+             result = GL_HALF_FLOAT;
+         }
+     }
+-    else if (functions->isAtLeastGLES(gl::Version(3, 0)))
+-    {
+-        if (type == GL_HALF_FLOAT_OES)
+-        {
+-            if (!IsLUMAFormat(format) || !functions->hasGLESExtension("GL_OES_texture_half_float"))
+-            {
+-                // In ES3, the luminance formats come from OES_texture_half_float, which uses
+-                // HALF_FLOAT_OES. Other formats (like RGBA) use HALF_FLOAT (non-OES) in ES3.
+-                // If they're emulated (see above), use HALF_FLOAT.
+-                result = GL_HALF_FLOAT;
+-            }
+-        }
+-    }
+     else if (functions->isAtLeastGLES(gl::Version(2, 0)))
+     {
+         // On ES2, convert GL_HALF_FLOAT to GL_HALF_FLOAT_OES as a convenience for internal
+@@ -880,13 +861,36 @@ CompressedTexSubImageFormat GetCompressedSubTexImageFormat(const FunctionsGL *fu
      return result;
  }
  
@@ -281,16 +369,6 @@ index d53f2b7..0538f5f 100644
 -    const gl::InternalFormat &formatInfo =
 -        gl::GetInternalFormatInfo(internalFormat, GL_UNSIGNED_BYTE);
 +    const gl::InternalFormat &formatInfo = GetCopyTexImageInternalFormatInfo(internalFormat, type);
-+    if (functions->isAtLeastGLES(gl::Version(3, 0)) && formatInfo.componentType == GL_FLOAT &&
-+        formatInfo.isLUMA())
-+    {
-+        // OpenGL ES 3.0 has no sized floating-point luminance or alpha formats, and drivers such
-+        // as Mesa's refuse to copy a floating-point color buffer into the unsized ones. Back them
-+        // with R or RG textures, as when the driver lacks OES_texture_half_float or
-+        // OES_texture_float.
-+        result.internalFormat = EmulateLUMA(formatInfo).sizedInternalFormat;
-+        return result;
-+    }
      result.internalFormat = GetTexImageNativeInternalFormat(functions, features, formatInfo);
      return result;
  }
@@ -329,10 +407,10 @@ index 15e6698..d9516ac 100644
  struct TexStorageFormat
  {
 diff --git a/src/tests/gl_tests/CopyTexImageTest.cpp b/src/tests/gl_tests/CopyTexImageTest.cpp
-index f0a0330..d495645 100644
+index f0a0330..db33962 100644
 --- a/src/tests/gl_tests/CopyTexImageTest.cpp
 +++ b/src/tests/gl_tests/CopyTexImageTest.cpp
-@@ -1096,6 +1096,53 @@ TEST_P(CopyTexImageTest, CopyTexSubImageMesaYFlip)
+@@ -1096,6 +1096,160 @@ TEST_P(CopyTexImageTest, CopyTexSubImageMesaYFlip)
                             GLColor::blue.data(), kFboSizes[0], kFboSizes[0]);
  }
  
@@ -383,14 +461,236 @@ index f0a0330..d495645 100644
 +    }
 +}
 +
++// Test that a half-float framebuffer can be copied into part of a half-float luminance/alpha
++// texture defined by glTexImage2D.
++TEST_P(CopyTexImageTest, HalfFloatToLUMASubImage)
++{
++    ANGLE_SKIP_TEST_IF(getClientMajorVersion() >= 3);
++    ANGLE_SKIP_TEST_IF(!EnsureGLExtensionEnabled("GL_OES_texture_half_float") ||
++                       !EnsureGLExtensionEnabled("GL_EXT_color_buffer_half_float"));
++
++    ANGLE_GL_PROGRAM(program, essl1_shaders::vs::Texture2D(), essl1_shaders::fs::Texture2D());
++
++    constexpr GLsizei kSize = 4;
++    const struct
++    {
++        GLenum format;
++        GLColor expected;
++    } kCases[] = {{GL_LUMINANCE, GLColor(64, 64, 64, 255)},
++                  {GL_ALPHA, GLColor(0, 0, 0, 191)},
++                  {GL_LUMINANCE_ALPHA, GLColor(64, 64, 64, 191)}};
++
++    GLTexture source;
++    glBindTexture(GL_TEXTURE_2D, source);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kSize, kSize, 0, GL_RGBA, GL_HALF_FLOAT_OES, nullptr);
++
++    GLFramebuffer framebuffer;
++    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source, 0);
++    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++    glClearColor(0.25f, 0.5f, 0.75f, 0.75f);
++    glClear(GL_COLOR_BUFFER_BIT);
++
++    for (const auto &testCase : kCases)
++    {
++        SCOPED_TRACE(testing::Message() << "format=0x" << std::hex << testCase.format);
++
++        GLTexture texture;
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glTexImage2D(GL_TEXTURE_2D, 0, testCase.format, kSize, kSize, 0, testCase.format,
++                     GL_HALF_FLOAT_OES, nullptr);
++
++        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, kSize, kSize);
++        ASSERT_GL_NO_ERROR();
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f);
++        EXPECT_PIXEL_COLOR_NEAR(getWindowWidth() / 2, getWindowHeight() / 2, testCase.expected, 2);
++    }
++}
++
++// Test that half-float data can be uploaded with glTexSubImage2D into a luminance/alpha texture
++// level defined by copying a half-float framebuffer.
++TEST_P(CopyTexImageTest, HalfFloatLUMAUploadAfterCopy)
++{
++    ANGLE_SKIP_TEST_IF(getClientMajorVersion() >= 3);
++    // Only the OpenGL backend keeps the source's half-float type in an ES 2.0 copy; the others
++    // copy into 8-bit formats, which reject half-float uploads.
++    ANGLE_SKIP_TEST_IF(!IsOpenGL());
++    ANGLE_SKIP_TEST_IF(!EnsureGLExtensionEnabled("GL_OES_texture_half_float") ||
++                       !EnsureGLExtensionEnabled("GL_EXT_color_buffer_half_float"));
++
++    ANGLE_GL_PROGRAM(program, essl1_shaders::vs::Texture2D(), essl1_shaders::fs::Texture2D());
++
++    constexpr GLsizei kSize  = 4;
++    constexpr GLushort kHalf = 0x3800;  // 0.5
++    const struct
++    {
++        GLenum format;
++        GLColor expected;
++    } kCases[] = {{GL_LUMINANCE, GLColor(128, 128, 128, 255)},
++                  {GL_ALPHA, GLColor(0, 0, 0, 128)},
++                  {GL_LUMINANCE_ALPHA, GLColor(128, 128, 128, 128)}};
++
++    GLTexture source;
++    glBindTexture(GL_TEXTURE_2D, source);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kSize, kSize, 0, GL_RGBA, GL_HALF_FLOAT_OES, nullptr);
++
++    GLFramebuffer framebuffer;
++    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source, 0);
++    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++    glClearColor(0.25f, 0.25f, 0.25f, 0.25f);
++    glClear(GL_COLOR_BUFFER_BIT);
++
++    const std::vector<GLushort> data(kSize * kSize * 2, kHalf);
++    for (const auto &testCase : kCases)
++    {
++        SCOPED_TRACE(testing::Message() << "format=0x" << std::hex << testCase.format);
++
++        GLTexture texture;
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++
++        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++        glCopyTexImage2D(GL_TEXTURE_2D, 0, testCase.format, 0, 0, kSize, kSize, 0);
++        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kSize, kSize, testCase.format, GL_HALF_FLOAT_OES,
++                        data.data());
++        ASSERT_GL_NO_ERROR();
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f);
++        EXPECT_PIXEL_COLOR_NEAR(getWindowWidth() / 2, getWindowHeight() / 2, testCase.expected, 2);
++    }
++}
++
  // Tests that set RobustResourceInit to true, so that code path with
  // RobustResourceInit == true can be checked
  class CopyTexImageTestRobustResourceInit : public CopyTexImageTest
+diff --git a/src/tests/gl_tests/TextureTest.cpp b/src/tests/gl_tests/TextureTest.cpp
+index c5e15c8..ed93556 100644
+--- a/src/tests/gl_tests/TextureTest.cpp
++++ b/src/tests/gl_tests/TextureTest.cpp
+@@ -26235,6 +26235,110 @@ TEST_P(Texture2DTestES3RobustInit, InvalidateEmulatedAlphaThenInitViaEmptyUpload
+     EXPECT_PIXEL_RECT_EQ(0, 0, kWidth, kHeight, GLColor::black);
+ }
+ 
++// Test that glCopyTexImage2D and glCopyTexSubImage2D with unsized GL_RGBA, GL_RGB, GL_LUMINANCE,
++// and GL_LUMINANCE_ALPHA internal formats from 16-bit packed framebuffers (GL_RGBA4, GL_RGB5_A1,
++// GL_RGB565) succeed and copy the rendered color when virtualizeBaseLevelAndMipchain is enabled
++// (https://crbug.com/577343656).
++TEST_P(Texture2DTestES3, CopyTexImageAndSubImageFrom16BitPackedFramebuffer)
++{
++    setUpProgram();
++    glUseProgram(mProgram);
++    glUniform1i(mTexture2DUniformLocation, 0);
++    glActiveTexture(GL_TEXTURE0);
++
++    struct SourceFormatCase
++    {
++        GLenum rboFormat;
++        bool hasAlpha;
++    };
++    constexpr std::array<SourceFormatCase, 3> kSourceFormats = {{
++        {GL_RGBA4, true},
++        {GL_RGB5_A1, true},
++        {GL_RGB565, false},
++    }};
++
++    for (const SourceFormatCase &src : kSourceFormats)
++    {
++        GLFramebuffer fbo;
++        GLRenderbuffer rbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++        glBindRenderbuffer(GL_RENDERBUFFER, rbo);
++        glRenderbufferStorage(GL_RENDERBUFFER, src.rboFormat, 8, 8);
++        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
++        ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++
++        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
++        glClear(GL_COLOR_BUFFER_BIT);
++
++        for (GLenum dstFormat : {GL_RGBA, GL_RGB, GL_LUMINANCE, GL_LUMINANCE_ALPHA})
++        {
++            if (!src.hasAlpha && (dstFormat == GL_RGBA || dstFormat == GL_LUMINANCE_ALPHA))
++            {
++                continue;
++            }
++            const GLColor expected = (dstFormat == GL_LUMINANCE || dstFormat == GL_LUMINANCE_ALPHA)
++                                         ? GLColor::white
++                                         : GLColor::red;
++
++            // Test glCopyTexImage2D.
++            GLTexture texCopy;
++            glBindTexture(GL_TEXTURE_2D, texCopy);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++            glCopyTexImage2D(GL_TEXTURE_2D, 0, dstFormat, 0, 0, 8, 8, 0);
++            ASSERT_GL_NO_ERROR();
++
++            // Test glCopyTexSubImage2D over a zero-initialized texture.
++            GLTexture texSubCopy;
++            glBindTexture(GL_TEXTURE_2D, texSubCopy);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++            const std::vector<uint8_t> initZeros(8 * 8 * 4, 0);
++            glTexImage2D(GL_TEXTURE_2D, 0, dstFormat, 8, 8, 0, dstFormat, GL_UNSIGNED_BYTE,
++                         initZeros.data());
++            glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, 8, 8);
++            ASSERT_GL_NO_ERROR();
++
++            glBindFramebuffer(GL_FRAMEBUFFER, 0);
++            glBindTexture(GL_TEXTURE_2D, texCopy);
++            drawQuad(mProgram, "position", 0.5f);
++            EXPECT_PIXEL_COLOR_EQ(0, 0, expected);
++
++            glBindTexture(GL_TEXTURE_2D, texSubCopy);
++            drawQuad(mProgram, "position", 0.5f);
++            EXPECT_PIXEL_COLOR_EQ(0, 0, expected);
++        }
++    }
++
++    // Also test self-copy glCopyTexImage2D on a 16-bit packed GL_RGBA / GL_UNSIGNED_SHORT_4_4_4_4
++    // texture attached to a framebuffer.
++    {
++        GLTexture selfTex;
++        glBindTexture(GL_TEXTURE_2D, selfTex);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4,
++                     nullptr);
++        ASSERT_GL_NO_ERROR();
++
++        GLFramebuffer selfFbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, selfFbo);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, selfTex, 0);
++        ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++
++        glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
++        glClear(GL_COLOR_BUFFER_BIT);
++
++        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, 8, 8, 0);
++        ASSERT_GL_NO_ERROR();
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        drawQuad(mProgram, "position", 0.5f);
++        EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::red);
++    }
++}
++
+ #define ES2_EMULATE_COPY_TEX_IMAGE_VIA_SUB()             \
+     ES2_OPENGL().enable(Feature::EmulateCopyTexImage2D), \
+         ES2_OPENGLES().enable(Feature::EmulateCopyTexImage2D)
 diff --git a/src/tests/gl_tests/WebGLCompatibilityTest.cpp b/src/tests/gl_tests/WebGLCompatibilityTest.cpp
-index f304aa2..581b16f 100644
+index f304aa2..4f3d6ea 100644
 --- a/src/tests/gl_tests/WebGLCompatibilityTest.cpp
 +++ b/src/tests/gl_tests/WebGLCompatibilityTest.cpp
-@@ -8247,6 +8247,196 @@ TEST_P(WebGL2CompatibilityTest, CubeMapArrayNotSupported)
+@@ -8247,6 +8247,753 @@ TEST_P(WebGL2CompatibilityTest, CubeMapArrayNotSupported)
      EXPECT_GL_ERROR(GL_INVALID_ENUM);
  }
  
@@ -438,6 +738,563 @@ index f304aa2..581b16f 100644
 +        default:
 +            UNREACHABLE();
 +            return GLColor::black;
++    }
++}
++
++// Port of WebGL 1 conformance test conformance/extensions/ext-color-buffer-half-float.html
++// (and 32-bit floating-point format checks when supported).
++TEST_P(WebGLCompatibilityTest, EXTColorBufferHalfFloat)
++{
++    const bool isWebGL2 = getClientMajorVersion() >= 3;
++
++    constexpr char kTestVS[] = R"(attribute vec4 a_position;
++varying vec2 texCoord;
++void main()
++{
++    gl_Position = vec4(a_position.xy, 0.0, 1.0);
++    texCoord = (a_position.xy * 0.5) + 0.5;
++})";
++
++    constexpr char kTestFS[] = R"(precision mediump float;
++uniform sampler2D tex;
++uniform vec4 subtractor;
++varying vec2 texCoord;
++void main()
++{
++    vec4 color = texture2D(tex, texCoord);
++    if (abs(color.r - subtractor.r) +
++        abs(color.g - subtractor.g) +
++        abs(color.b - subtractor.b) +
++        abs(color.a - subtractor.a) < 16.0) {
++        gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);
++    } else {
++        gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
++    }
++})";
++
++    constexpr char kFloatFS[] = R"(precision mediump float;
++void main()
++{
++    gl_FragColor = vec4(1000.0, 1000.0, 1000.0, 1000.0);
++})";
++
++    ANGLE_GL_PROGRAM(testProgram, kTestVS, kTestFS);
++    ANGLE_GL_PROGRAM(renderProgram, essl1_shaders::vs::Simple(), kFloatFS);
++
++    auto allocateTexture = [](GLTexture *texture) {
++        glBindTexture(GL_TEXTURE_2D, *texture);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++        EXPECT_GL_NO_ERROR();
++    };
++
++    auto runReadbackTest = [](const std::array<float, 4> &subtractor) {
++        std::array<float, 4> buf = {};
++        glReadPixels(0, 0, 1, 1, GL_RGBA, GL_FLOAT, buf.data());
++        EXPECT_GL_NO_ERROR();
++        constexpr float kTolerance = 8.0f;
++        for (size_t ii = 0; ii < 4; ++ii)
++        {
++            EXPECT_NEAR(buf[ii], subtractor[ii], kTolerance);
++        }
++    };
++
++    auto runFloatTextureRenderTargetTest = [&](bool enabled, GLenum internalFormat, GLenum format,
++                                               GLenum type, int numberOfChannels,
++                                               const std::array<float, 4> &subtractor,
++                                               float texSubImageCover) {
++        GLTexture texture;
++        allocateTexture(&texture);
++        constexpr GLsizei kWidth  = 2;
++        constexpr GLsizei kHeight = 2;
++        glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, kWidth, kHeight, 0, format, type, nullptr);
++        EXPECT_GL_NO_ERROR();
++
++        GLFramebuffer fbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
++        glBindTexture(GL_TEXTURE_2D, 0);
++
++        GLenum completeStatus = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++        if (!enabled)
++        {
++            EXPECT_GLENUM_NE(GL_FRAMEBUFFER_COMPLETE, completeStatus);
++            return;
++        }
++        if (completeStatus != GL_FRAMEBUFFER_COMPLETE)
++        {
++            if (!isWebGL2 && format == GL_RGB)
++            {
++                return;
++            }
++            FAIL() << "Floating-point render target not supported for format 0x" << std::hex
++                   << internalFormat;
++        }
++
++        if (texSubImageCover > 0.0f)
++        {
++            glBindTexture(GL_TEXTURE_2D, texture);
++            GLsizei subHeight = static_cast<GLsizei>(kHeight * texSubImageCover);
++            std::vector<float> data(kWidth * subHeight * numberOfChannels, 0.0f);
++            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kWidth, subHeight, format, type, data.data());
++            EXPECT_GL_NO_ERROR();
++            glBindTexture(GL_TEXTURE_2D, 0);
++            ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
++        }
++
++        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
++        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++        drawQuad(renderProgram, essl1_shaders::PositionAttrib(), 0.5f, 1.0f, true);
++        EXPECT_GL_NO_ERROR();
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glUseProgram(testProgram);
++        glUniform1i(glGetUniformLocation(testProgram, "tex"), 0);
++        glUniform4fv(glGetUniformLocation(testProgram, "subtractor"), 1, subtractor.data());
++        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
++        drawQuad(testProgram, "a_position", 0.5f, 1.0f, true);
++        EXPECT_GL_NO_ERROR();
++        EXPECT_PIXEL_COLOR_EQ(0, 0, GLColor::green);
++
++        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++        runReadbackTest(subtractor);
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    };
++
++    auto runFloatRenderbufferRenderTargetTest = [&](bool enabled, GLenum internalFormat,
++                                                    const std::array<float, 4> &subtractor) {
++        std::vector<GLint> samples;
++        if (enabled && isWebGL2)
++        {
++            GLint numSamples = 0;
++            glGetInternalformativ(GL_RENDERBUFFER, internalFormat, GL_NUM_SAMPLE_COUNTS, 1,
++                                  &numSamples);
++            if (numSamples > 0)
++            {
++                samples.resize(numSamples);
++                glGetInternalformativ(GL_RENDERBUFFER, internalFormat, GL_SAMPLES, numSamples,
++                                      samples.data());
++            }
++        }
++        samples.push_back(0);
++
++        for (GLint sampleCount : samples)
++        {
++            GLRenderbuffer colorbuffer;
++            constexpr GLsizei kWidth  = 2;
++            constexpr GLsizei kHeight = 2;
++            glBindRenderbuffer(GL_RENDERBUFFER, colorbuffer);
++            if (sampleCount == 0)
++            {
++                glRenderbufferStorage(GL_RENDERBUFFER, internalFormat, kWidth, kHeight);
++            }
++            else
++            {
++                glRenderbufferStorageMultisample(GL_RENDERBUFFER, sampleCount, internalFormat,
++                                                 kWidth, kHeight);
++            }
++            if (!enabled)
++            {
++                EXPECT_GL_ERROR(GL_INVALID_ENUM);
++                return;
++            }
++            EXPECT_GL_NO_ERROR();
++
++            GLFramebuffer fbo;
++            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
++                                      colorbuffer);
++            ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
++
++            GLRenderbuffer resolveColorRbo;
++            GLFramebuffer resolveFbo;
++            if (sampleCount > 0)
++            {
++                glBindRenderbuffer(GL_RENDERBUFFER, resolveColorRbo);
++                glRenderbufferStorage(GL_RENDERBUFFER, internalFormat, kWidth, kHeight);
++                glBindFramebuffer(GL_FRAMEBUFFER, resolveFbo);
++                glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER,
++                                          resolveColorRbo);
++                ASSERT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
++            }
++
++            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++            glClearColor(1000.0f, 1000.0f, 1000.0f, 1000.0f);
++            glClear(GL_COLOR_BUFFER_BIT);
++
++            if (sampleCount > 0)
++            {
++                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolveFbo);
++                glBlitFramebuffer(0, 0, kWidth, kHeight, 0, 0, kWidth, kHeight, GL_COLOR_BUFFER_BIT,
++                                  GL_NEAREST);
++                glBindFramebuffer(GL_READ_FRAMEBUFFER, resolveFbo);
++            }
++            runReadbackTest(subtractor);
++            glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        }
++    };
++
++    auto runRGB16FNegativeTest = [&]() {
++        GLTexture texture;
++        allocateTexture(&texture);
++        constexpr GLsizei kWidth  = 2;
++        constexpr GLsizei kHeight = 2;
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB16F, kWidth, kHeight, 0, GL_RGB, GL_FLOAT, nullptr);
++        EXPECT_GL_NO_ERROR();
++
++        GLFramebuffer fbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
++        glBindTexture(GL_TEXTURE_2D, 0);
++        EXPECT_GLENUM_NE(GL_FRAMEBUFFER_COMPLETE, glCheckFramebufferStatus(GL_FRAMEBUFFER));
++
++        GLRenderbuffer colorbuffer;
++        glBindRenderbuffer(GL_RENDERBUFFER, colorbuffer);
++        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGB16F, kWidth, kHeight);
++        EXPECT_GL_ERROR(GL_INVALID_ENUM);
++        glBindRenderbuffer(GL_RENDERBUFFER, 0);
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    };
++
++    auto runInternalFormatQueryTest = [&]() {
++        constexpr std::array<GLenum, 3> kFormats = {GL_RGBA16F, GL_R16F, GL_RG16F};
++        for (GLenum format : kFormats)
++        {
++            GLint numSamples = 0;
++            glGetInternalformativ(GL_RENDERBUFFER, format, GL_NUM_SAMPLE_COUNTS, 1, &numSamples);
++            std::vector<GLint> samples(std::max(0, numSamples));
++            if (numSamples > 0)
++            {
++                glGetInternalformativ(GL_RENDERBUFFER, format, GL_SAMPLES, numSamples,
++                                      samples.data());
++            }
++            GLint prevSampleCount = 0;
++            for (size_t ndx = 0; ndx < samples.size(); ++ndx)
++            {
++                GLint sampleCount = samples[ndx];
++                EXPECT_GT(sampleCount, 0);
++                if (ndx > 0)
++                {
++                    EXPECT_LT(sampleCount, prevSampleCount);
++                }
++                prevSampleCount = sampleCount;
++            }
++        }
++    };
++
++    auto runCopyTexImageTest = [&](bool enabled, GLenum texType) {
++        constexpr GLsizei kWidth  = 16;
++        constexpr GLsizei kHeight = 16;
++        constexpr GLint kLevel    = 0;
++        struct CopyTestCase
++        {
++            GLenum internalformat;
++            GLenum format;
++            GLenum destFormat;
++            bool valid;
++            bool renderable;
++        };
++
++        std::vector<CopyTestCase> cases;
++        if (isWebGL2)
++        {
++            const bool isHalfFloat = (texType == GL_HALF_FLOAT);
++            const GLenum rgbaFmt   = isHalfFloat ? GL_RGBA16F : GL_RGBA32F;
++            const GLenum rgbFmt    = isHalfFloat ? GL_RGB16F : GL_RGB32F;
++            const GLenum rgFmt     = isHalfFloat ? GL_RG16F : GL_RG32F;
++            const GLenum rFmt      = isHalfFloat ? GL_R16F : GL_R32F;
++            cases                  = {
++                {rgbaFmt, GL_RGBA, rFmt, true, true},   {rgbaFmt, GL_RGBA, rgFmt, true, true},
++                {rgbaFmt, GL_RGBA, rgbFmt, true, true}, {rgbaFmt, GL_RGBA, rgbaFmt, true, true},
++                {rgbFmt, GL_RGB, rFmt, true, false},    {rgbFmt, GL_RGB, rgFmt, true, false},
++                {rgbFmt, GL_RGB, rgbFmt, true, false},  {rgbFmt, GL_RGB, rgbaFmt, false, false},
++                {rgFmt, GL_RG, rFmt, true, true},       {rgFmt, GL_RG, rgFmt, true, true},
++                {rgFmt, GL_RG, rgbFmt, false, true},    {rgFmt, GL_RG, rgbaFmt, false, true},
++                {rFmt, GL_RED, rFmt, true, true},       {rFmt, GL_RED, rgFmt, false, true},
++                {rFmt, GL_RED, rgbFmt, false, true},    {rFmt, GL_RED, rgbaFmt, false, true},
++            };
++        }
++        else
++        {
++            cases = {
++                {GL_RGBA, GL_RGBA, GL_LUMINANCE, true, true},
++                {GL_RGBA, GL_RGBA, GL_ALPHA, true, true},
++                {GL_RGBA, GL_RGBA, GL_LUMINANCE_ALPHA, true, true},
++                {GL_RGBA, GL_RGBA, GL_RGB, true, true},
++                {GL_RGBA, GL_RGBA, GL_RGBA, true, true},
++                {GL_RGB, GL_RGB, GL_LUMINANCE, true, true},
++                {GL_RGB, GL_RGB, GL_ALPHA, false, true},
++                {GL_RGB, GL_RGB, GL_LUMINANCE_ALPHA, false, true},
++                {GL_RGB, GL_RGB, GL_RGB, true, true},
++                {GL_RGB, GL_RGB, GL_RGBA, false, true},
++                {GL_ALPHA, GL_ALPHA, GL_ALPHA, true, false},
++                {GL_LUMINANCE, GL_LUMINANCE, GL_LUMINANCE, true, false},
++                {GL_LUMINANCE_ALPHA, GL_LUMINANCE_ALPHA, GL_LUMINANCE_ALPHA, true, false},
++            };
++        }
++
++        std::vector<uint16_t> halfData(kWidth * kHeight * 4, 0);
++        std::vector<float> floatData(kWidth * kHeight * 4, 0.0f);
++        const void *pixelData = (texType == GL_FLOAT) ? static_cast<const void *>(floatData.data())
++                                                      : static_cast<const void *>(halfData.data());
++        ANGLE_GL_PROGRAM(copyVerifyProgram, essl1_shaders::vs::Texture2D(),
++                         essl1_shaders::fs::Texture2D());
++
++        for (const CopyTestCase &testcase : cases)
++        {
++            SCOPED_TRACE(testing::Message()
++                         << "internalformat=0x" << std::hex << testcase.internalformat
++                         << " destFormat=0x" << testcase.destFormat << " texType=0x" << texType);
++            GLTexture texSrc;
++            glBindTexture(GL_TEXTURE_2D, texSrc);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++            glTexImage2D(GL_TEXTURE_2D, kLevel, testcase.internalformat, kWidth, kHeight, 0,
++                         testcase.format, texType, pixelData);
++
++            GLFramebuffer fbo;
++            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texSrc,
++                                   kLevel);
++
++            GLTexture texDest;
++            allocateTexture(&texDest);
++
++            if (enabled && testcase.renderable)
++            {
++                if (!isWebGL2 && testcase.format == GL_RGB &&
++                    glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
++                        GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT)
++                {
++                    // RGB framebuffer attachment is optional in WebGL 1.
++                }
++                else
++                {
++                    EXPECT_GLENUM_EQ(GL_FRAMEBUFFER_COMPLETE,
++                                     glCheckFramebufferStatus(GL_FRAMEBUFFER));
++                    glClearColor(kCopyTestFullColor[0], kCopyTestFullColor[1],
++                                 kCopyTestFullColor[2], kCopyTestFullColor[3]);
++                    glClear(GL_COLOR_BUFFER_BIT);
++                    glCopyTexImage2D(GL_TEXTURE_2D, kLevel, testcase.destFormat, 0, 0, kWidth,
++                                     kHeight, 0);
++                    if (testcase.valid)
++                    {
++                        EXPECT_GL_NO_ERROR();
++                        glClearColor(kCopyTestSubColor[0], kCopyTestSubColor[1],
++                                     kCopyTestSubColor[2], kCopyTestSubColor[3]);
++                        glClear(GL_COLOR_BUFFER_BIT);
++                        glCopyTexSubImage2D(GL_TEXTURE_2D, kLevel, 0, 0, 0, 0, kWidth / 2,
++                                            kHeight / 2);
++                        EXPECT_GL_NO_ERROR();
++
++                        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++                        drawQuad(copyVerifyProgram, essl1_shaders::PositionAttrib(), 0.5f, 1.0f,
++                                 true);
++                        EXPECT_GL_NO_ERROR();
++
++                        const GLColor expectedSub =
++                            ExpectedSampledCopyColor(testcase.destFormat, kCopyTestSubColor);
++                        const GLColor expectedFull =
++                            ExpectedSampledCopyColor(testcase.destFormat, kCopyTestFullColor);
++                        EXPECT_PIXEL_NEAR(getWindowWidth() / 4, getWindowHeight() / 4,
++                                          expectedSub.R, expectedSub.G, expectedSub.B,
++                                          expectedSub.A, 2);
++                        EXPECT_PIXEL_NEAR(getWindowWidth() * 3 / 4, getWindowHeight() * 3 / 4,
++                                          expectedFull.R, expectedFull.G, expectedFull.B,
++                                          expectedFull.A, 2);
++                    }
++                    else
++                    {
++                        GLenum err = glGetError();
++                        EXPECT_TRUE(err == GL_INVALID_ENUM || err == GL_INVALID_OPERATION);
++                    }
++                }
++            }
++            else
++            {
++                EXPECT_GLENUM_EQ(GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT,
++                                 glCheckFramebufferStatus(GL_FRAMEBUFFER));
++                glCopyTexImage2D(GL_TEXTURE_2D, kLevel, testcase.destFormat, 0, 0, kWidth, kHeight,
++                                 0);
++                GLenum err = glGetError();
++                EXPECT_TRUE(err == GL_INVALID_ENUM || err == GL_INVALID_FRAMEBUFFER_OPERATION);
++            }
++            glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        }
++    };
++
++    if (isWebGL2)
++    {
++        runFloatTextureRenderTargetTest(false, GL_R16F, GL_RED, GL_FLOAT, 1, {0, 0, 0, 0}, 0.0f);
++        runFloatTextureRenderTargetTest(false, GL_RG16F, GL_RG, GL_FLOAT, 2, {0, 0, 0, 0}, 0.0f);
++        runFloatTextureRenderTargetTest(false, GL_RGBA16F, GL_RGBA, GL_FLOAT, 4, {0, 0, 0, 0},
++                                        0.0f);
++    }
++
++    runFloatRenderbufferRenderTargetTest(false, GL_R16F, {0, 0, 0, 0});
++    runFloatRenderbufferRenderTargetTest(false, GL_RG16F, {0, 0, 0, 0});
++    runFloatRenderbufferRenderTargetTest(false, GL_RGBA16F, {0, 0, 0, 0});
++    runFloatRenderbufferRenderTargetTest(false, GL_R32F, {0, 0, 0, 0});
++    runFloatRenderbufferRenderTargetTest(false, GL_RG32F, {0, 0, 0, 0});
++    runFloatRenderbufferRenderTargetTest(false, GL_RGBA32F, {0, 0, 0, 0});
++    runFloatRenderbufferRenderTargetTest(false, GL_R11F_G11F_B10F, {0, 0, 0, 0});
++
++    if (isWebGL2)
++    {
++        runCopyTexImageTest(false, GL_HALF_FLOAT);
++        runRGB16FNegativeTest();
++    }
++    else
++    {
++        GLFramebuffer fbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++
++        GLRenderbuffer rbo;
++        glBindRenderbuffer(GL_RENDERBUFFER, rbo);
++        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
++        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGB565, 8, 8);
++        EXPECT_GL_NO_ERROR();
++        GLint componentType = 0;
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_ERROR(GL_INVALID_ENUM);
++
++        GLTexture tex;
++        glBindTexture(GL_TEXTURE_2D, tex);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++        EXPECT_GL_NO_ERROR();
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_ERROR(GL_INVALID_ENUM);
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    }
++
++    if (!isWebGL2)
++    {
++        if (!EnsureGLExtensionEnabled("GL_OES_texture_half_float"))
++        {
++            return;
++        }
++    }
++
++    if (!EnsureGLExtensionEnabled("GL_EXT_color_buffer_half_float"))
++    {
++        return;
++    }
++
++    if (isWebGL2)
++    {
++        runInternalFormatQueryTest();
++        runFloatTextureRenderTargetTest(true, GL_R16F, GL_RED, GL_FLOAT, 1,
++                                        {1000.0f, 1.0f, 1.0f, 1.0f}, 0.0f);
++        runFloatTextureRenderTargetTest(true, GL_RG16F, GL_RG, GL_FLOAT, 2,
++                                        {1000.0f, 1000.0f, 1.0f, 1.0f}, 0.0f);
++        runFloatTextureRenderTargetTest(true, GL_RGBA16F, GL_RGBA, GL_FLOAT, 4,
++                                        {1000.0f, 1000.0f, 1000.0f, 1000.0f}, 0.0f);
++        runFloatRenderbufferRenderTargetTest(true, GL_R16F, {1000.0f, 1.0f, 1.0f, 1.0f});
++        runFloatRenderbufferRenderTargetTest(true, GL_RG16F, {1000.0f, 1000.0f, 1.0f, 1.0f});
++        runFloatRenderbufferRenderTargetTest(true, GL_RGBA16F,
++                                             {1000.0f, 1000.0f, 1000.0f, 1000.0f});
++        runRGB16FNegativeTest();
++        runCopyTexImageTest(true, GL_HALF_FLOAT);
++    }
++    else
++    {
++        runFloatTextureRenderTargetTest(true, GL_RGBA, GL_RGBA, GL_HALF_FLOAT_OES, 4,
++                                        {1000.0f, 1000.0f, 1000.0f, 1000.0f}, 0.0f);
++        runFloatTextureRenderTargetTest(true, GL_RGB, GL_RGB, GL_HALF_FLOAT_OES, 3,
++                                        {1000.0f, 1000.0f, 1000.0f, 1.0f}, 0.0f);
++        runFloatTextureRenderTargetTest(false, GL_LUMINANCE_ALPHA, GL_LUMINANCE_ALPHA,
++                                        GL_HALF_FLOAT_OES, 2, {1000.0f, 1000.0f, 1000.0f, 1000.0f},
++                                        0.0f);
++        runFloatTextureRenderTargetTest(false, GL_LUMINANCE, GL_LUMINANCE, GL_HALF_FLOAT_OES, 1,
++                                        {1000.0f, 1.0f, 1.0f, 1.0f}, 0.0f);
++        runCopyTexImageTest(true, GL_HALF_FLOAT_OES);
++    }
++
++    // Also check 32-bit floating-point formats if supported.
++    if (isWebGL2)
++    {
++        if (EnsureGLExtensionEnabled("GL_EXT_color_buffer_float"))
++        {
++            runCopyTexImageTest(true, GL_FLOAT);
++        }
++    }
++    else
++    {
++        if (EnsureGLExtensionEnabled("GL_OES_texture_float") &&
++            EnsureGLExtensionEnabled("GL_WEBGL_color_buffer_float"))
++        {
++            runFloatTextureRenderTargetTest(true, GL_RGBA, GL_RGBA, GL_FLOAT, 4,
++                                            {1000.0f, 1000.0f, 1000.0f, 1000.0f}, 0.0f);
++            runFloatTextureRenderTargetTest(true, GL_RGB, GL_RGB, GL_FLOAT, 3,
++                                            {1000.0f, 1000.0f, 1000.0f, 1.0f}, 0.0f);
++            runCopyTexImageTest(true, GL_FLOAT);
++        }
++    }
++
++    {
++        GLFramebuffer fbo;
++        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
++
++        GLRenderbuffer rbo;
++        glBindRenderbuffer(GL_RENDERBUFFER, rbo);
++        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, rbo);
++        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGB565, 8, 8);
++        GLint componentType = 0;
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_NO_ERROR();
++        EXPECT_GLENUM_EQ(GL_UNSIGNED_NORMALIZED_EXT, componentType);
++
++        glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA16F_EXT, 8, 8);
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_NO_ERROR();
++        EXPECT_GLENUM_EQ(GL_FLOAT, componentType);
++
++        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER,
++                                  rbo);
++        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, 8, 8);
++        EXPECT_GL_NO_ERROR();
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_ERROR(GL_INVALID_OPERATION);
++
++        GLTexture tex;
++        glBindTexture(GL_TEXTURE_2D, tex);
++        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_NO_ERROR();
++        EXPECT_GLENUM_EQ(GL_UNSIGNED_NORMALIZED_EXT, componentType);
++
++        if (isWebGL2)
++        {
++            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 8, 8, 0, GL_RGBA, GL_HALF_FLOAT, nullptr);
++        }
++        else
++        {
++            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 8, 8, 0, GL_RGBA, GL_HALF_FLOAT_OES, nullptr);
++        }
++        glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE_EXT,
++                                              &componentType);
++        EXPECT_GL_NO_ERROR();
++        EXPECT_GLENUM_EQ(GL_FLOAT, componentType);
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
 +    }
 +}
 +
