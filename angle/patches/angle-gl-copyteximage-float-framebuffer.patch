@@ -126,7 +126,7 @@ index 833e3db..583e4d6 100644
          mStateManager->bindFramebuffer(GL_READ_FRAMEBUFFER, sourceGL->getFramebufferID());
          mStateManager->bindTexture(gl::TextureType::_2D, textureId);
 diff --git a/src/libANGLE/renderer/gl/TextureGL.cpp b/src/libANGLE/renderer/gl/TextureGL.cpp
-index 1dde822..226867b 100644
+index 1dde822..9b49712 100644
 --- a/src/libANGLE/renderer/gl/TextureGL.cpp
 +++ b/src/libANGLE/renderer/gl/TextureGL.cpp
 @@ -980,6 +980,7 @@ angle::Result TextureGL::handleCopyImageSelfCopyRedefine(const gl::Context *cont
@@ -224,6 +224,16 @@ index 1dde822..226867b 100644
          if (features.forceLumaWorkaroundForSameTextureCopyTexImage2D.enabled &&
              !levelInfo.lumaWorkaround.enabled && originalInternalFormatInfo.isLUMA() &&
              isSourceTextureSame)
+@@ -1253,8 +1282,8 @@ angle::Result TextureGL::copyImage(const gl::Context *context,
+                 }
+             }
+         }
+-        setLevelInfo(context, target, level, 1, levelInfo);
+     }
++    setLevelInfo(context, target, level, 1, levelInfo);
+ 
+     contextGL->markWorkSubmitted();
+     return angle::Result::Continue;
 diff --git a/src/libANGLE/renderer/gl/TextureGL.h b/src/libANGLE/renderer/gl/TextureGL.h
 index 91cecfe..525dbea 100644
 --- a/src/libANGLE/renderer/gl/TextureGL.h
@@ -687,10 +697,10 @@ index c5e15c8..ed93556 100644
      ES2_OPENGL().enable(Feature::EmulateCopyTexImage2D), \
          ES2_OPENGLES().enable(Feature::EmulateCopyTexImage2D)
 diff --git a/src/tests/gl_tests/WebGLCompatibilityTest.cpp b/src/tests/gl_tests/WebGLCompatibilityTest.cpp
-index f304aa2..4f3d6ea 100644
+index f304aa2..596643c 100644
 --- a/src/tests/gl_tests/WebGLCompatibilityTest.cpp
 +++ b/src/tests/gl_tests/WebGLCompatibilityTest.cpp
-@@ -8247,6 +8247,753 @@ TEST_P(WebGL2CompatibilityTest, CubeMapArrayNotSupported)
+@@ -8247,6 +8247,800 @@ TEST_P(WebGL2CompatibilityTest, CubeMapArrayNotSupported)
      EXPECT_GL_ERROR(GL_INVALID_ENUM);
  }
  
@@ -1438,6 +1448,53 @@ index f304aa2..4f3d6ea 100644
 +        {
 +            runTestForType(GL_RGBA, GL_FLOAT, kUnsizedDestFormats, GL_RGBA);
 +        }
++    }
++}
++
++// Test that a glCopyTexImage2D entirely outside a half-float framebuffer defines a zero-filled
++// luminance/alpha texture that samples with the destination format's channels.
++TEST_P(WebGLCompatibilityTest, CopyTexImageOutsideFloatFramebufferToLUMA)
++{
++    ANGLE_SKIP_TEST_IF(getClientMajorVersion() >= 3);
++    ANGLE_SKIP_TEST_IF(!EnsureGLExtensionEnabled("GL_OES_texture_half_float") ||
++                       !EnsureGLExtensionEnabled("GL_EXT_color_buffer_half_float"));
++
++    ANGLE_GL_PROGRAM(program, essl1_shaders::vs::Texture2D(), essl1_shaders::fs::Texture2D());
++
++    constexpr GLsizei kSize = 4;
++    const struct
++    {
++        GLenum format;
++        GLColor expected;
++    } kCases[] = {{GL_LUMINANCE, GLColor::black},
++                  {GL_ALPHA, GLColor::transparentBlack},
++                  {GL_LUMINANCE_ALPHA, GLColor::transparentBlack}};
++
++    GLTexture source;
++    glBindTexture(GL_TEXTURE_2D, source);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, kSize, kSize, 0, GL_RGBA, GL_HALF_FLOAT_OES, nullptr);
++
++    GLFramebuffer framebuffer;
++    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, source, 0);
++    ASSERT_GL_FRAMEBUFFER_COMPLETE(GL_FRAMEBUFFER);
++
++    for (const auto &testCase : kCases)
++    {
++        SCOPED_TRACE(testing::Message() << "format=0x" << std::hex << testCase.format);
++
++        GLTexture texture;
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++
++        glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++        glCopyTexImage2D(GL_TEXTURE_2D, 0, testCase.format, kSize, kSize, kSize, kSize, 0);
++        ASSERT_GL_NO_ERROR();
++
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        drawQuad(program, essl1_shaders::PositionAttrib(), 0.5f, 1.0f, true);
++        EXPECT_PIXEL_COLOR_EQ(getWindowWidth() / 2, getWindowHeight() / 2, testCase.expected);
 +    }
 +}
 +
