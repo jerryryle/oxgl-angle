@@ -313,3 +313,17 @@ index a94f54f..1504b8c 100644
        write32AArch64Addr(Target, Value, FinalAddress, 12);
        break;
      }
+diff --git a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldMachOAArch64.h b/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldMachOAArch64.h
+index f2ee1b0..334bcbc 100644
+--- a/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldMachOAArch64.h
++++ b/third_party/SwiftShader/third_party/llvm-10.0/llvm/lib/ExecutionEngine/RuntimeDyld/Targets/RuntimeDyldMachOAArch64.h
+@@ -207,7 +207,8 @@ public:
+ 
+       // Check that the addend fits into 21 bits (+ 12 lower bits).
+       assert((Addend & 0xFFF) == 0 && "ADRP target is not page aligned.");
+-      assert(isInt<33>(Addend) && "Invalid page reloc value.");
++      if (!isInt<33>(Addend))
++        report_fatal_error("ARM64_RELOC_PAGE21 out of range");
+ 
+       // Encode the addend into the instruction.
+       uint32_t ImmLoValue = ((uint64_t)Addend << 17) & 0x60000000;
