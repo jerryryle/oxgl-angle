@@ -51,7 +51,7 @@ index 31c5706..8d06b1a 100644
                               const gl::Rectangle &area,
                               GLenum format,
 diff --git a/src/tests/gl_tests/ReadPixelsTest.cpp b/src/tests/gl_tests/ReadPixelsTest.cpp
-index 16be449..75efa2a 100644
+index 16be449..8649b50 100644
 --- a/src/tests/gl_tests/ReadPixelsTest.cpp
 +++ b/src/tests/gl_tests/ReadPixelsTest.cpp
 @@ -63,6 +63,112 @@ TEST_P(ReadPixelsTest, OutOfBounds)
@@ -93,7 +93,7 @@ index 16be449..75efa2a 100644
 +{
 +    ANGLE_SKIP_TEST_IF(getClientMajorVersion() < 3);
 +
-+    constexpr GLenum kUnsignedFormats[] = {GL_R8UI,     GL_RG16UI,   GL_RGBA8UI,
++    constexpr GLenum kUnsignedFormats[] = {GL_R8UI,     GL_R16UI,    GL_RG16UI,    GL_RGBA8UI,
 +                                           GL_RGBA16UI, GL_RGBA32UI, GL_RGB10_A2UI};
 +    constexpr GLenum kSignedFormats[]   = {GL_R8I, GL_RG16I, GL_RGBA8I, GL_RGBA16I, GL_RGBA32I};
 +
