@@ -1,0 +1,19 @@
+diff --git a/src/libANGLE/renderer/gl/egl/DisplayEGL.cpp b/src/libANGLE/renderer/gl/egl/DisplayEGL.cpp
+index b02e35665f..91cf4244d3 100644
+--- a/src/libANGLE/renderer/gl/egl/DisplayEGL.cpp
++++ b/src/libANGLE/renderer/gl/egl/DisplayEGL.cpp
+@@ -830,6 +830,14 @@ void DisplayEGL::destroyNativeContext(EGLContext context)
+         }
+     }
+ 
++    // The loop above stopped tracking this context, so releasing to no context later would skip
++    // eglMakeCurrent and leave it bound.  EGL defers destroying a current context until it is
++    // released, so it would leak if this thread exited with the context still bound.
++    if (mEGL->getCurrentContext() == context)
++    {
++        mEGL->makeCurrent(EGL_NO_SURFACE, EGL_NO_CONTEXT);
++    }
++
+     mEGL->destroyContext(context);
+ }
+ 
